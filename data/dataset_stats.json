@@ -1,0 +1,23 @@
+{
+  "total_examples": 999,
+  "by_scenario_type": {
+    "coding": 201,
+    "research": 201,
+    "support": 195,
+    "tool_heavy": 201,
+    "analysis": 201
+  },
+  "by_target_ratio": {
+    "3.0": 333,
+    "5.0": 333,
+    "10.0": 333
+  },
+  "by_turn_age": {
+    "recent": 333,
+    "mid": 333,
+    "old": 333
+  },
+  "avg_original_chars": 7512,
+  "avg_compressed_chars": 1190,
+  "avg_compression_ratio": 6.31
+}

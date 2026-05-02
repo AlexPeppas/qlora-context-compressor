@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "compressor"
+version = "0.1.0"
+description = "ACON progressive context compressor for long-running LLM conversations"
+requires-python = ">=3.10"
+dependencies = [
+    # Anthropic API client — dataset generation + LLM loop
+    "anthropic>=0.25.0",
+    # .env loading (ANTHROPIC_API_KEY, etc.)
+    "python-dotenv>=1.0.0",
+    # Extractive summarisation (LexRank / LSA fallback compressor)
+    "sumy>=0.11.0",
+    # Sentence tokenisation used by sumy
+    "nltk>=3.8.0",
+]
+
+[project.optional-dependencies]
+
+# Full QLoRA training stack — install with: pip install -e ".[train]"
+# -------------------------------------------------------------------
+# NOTE — torch ships CPU-only from PyPI.
+# For CUDA (recommended), install torch separately first:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# then install the rest:
+#   pip install -e ".[train]"
+train = [
+    "torch>=2.2.0",
+    "transformers>=4.40.0",
+    # LoRA / QLoRA adapter wrappers
+    "peft>=0.10.0",
+    # SFTTrainer — SFTConfig requires >=0.9.0
+    "trl>=0.9.0",
+    # 4-bit quantisation (QLoRA); Windows support landed in 0.43.0
+    "bitsandbytes>=0.43.0",
+    # Multi-GPU and mixed-precision utilities
+    "accelerate>=0.30.0",
+    # HuggingFace Dataset used by SFTTrainer
+    "datasets>=2.14.0",
+]
+
+# Better named-entity extraction — install with: pip install -e ".[nlp]"
+# After install, download the model: python -m spacy download en_core_web_sm
+nlp = [
+    "spacy>=3.7.0",
+]
+
+# Linting + tests
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4.0",
+]
+
+# Everything except dev — pip install -e ".[all]"
+all = [
+    "compressor[train,nlp]",
+]
+
+[project.scripts]
+compressor-train = "compressor.train_lora:main"
+
+# ---------------------------------------------------------------------------
+# Package layout
+# ---------------------------------------------------------------------------
+# pyproject.toml lives inside the compressor/ directory, which IS the package.
+# We tell setuptools that "compressor" package root = current directory (".").
+# This maps:
+#   ./anchor_store.py  → compressor.anchor_store
+#   ./train_lora.py    → compressor.train_lora
+#   etc.
+[tool.setuptools]
+packages = ["compressor"]
+
+[tool.setuptools.package-dir]
+"compressor" = "."
+
+# ---------------------------------------------------------------------------
+# uv users: override the torch index for CUDA 12.1 wheels
+# (uv handles this transparently; pip users see the comment above instead)
+# ---------------------------------------------------------------------------
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true

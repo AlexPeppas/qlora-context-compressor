@@ -1,0 +1,33 @@
+# compressor/ — Python dependencies
+#
+# Core (required)
+# ----------------
+# anthropic: Anthropic API client (teacher LLM + LLMConversationLoop)
+anthropic>=0.25.0
+# python-dotenv: loads ANTHROPIC_API_KEY from .env files
+python-dotenv>=1.0.0
+# sumy: extractive summarisation (LexRank / LSA)
+sumy>=0.11.0
+# nltk: sentence tokenisation used by sumy and the fallback compressor
+nltk>=3.8.0
+
+# Training stack (required for train_lora.py)
+# --------------------------------------------
+# transformers: Hugging Face model loading and tokenisation
+transformers>=4.40.0
+# peft: LoRA / QLoRA adapter wrappers
+peft>=0.10.0
+# trl: SFTTrainer for supervised fine-tuning
+trl>=0.8.0
+# bitsandbytes: 4-bit quantisation (QLoRA)
+bitsandbytes>=0.43.0
+# accelerate: multi-GPU / mixed-precision training utilities
+accelerate>=0.29.0
+# torch: base deep-learning framework (install separately per CUDA version)
+torch>=2.2.0
+
+# Optional — uncomment for better named-entity extraction
+# --------------------------------------------------------
+# spacy>=3.7.0
+# # After installing spaCy, download the model with:
+# #   python -m spacy download en_core_web_sm

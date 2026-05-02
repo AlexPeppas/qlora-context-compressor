@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Tooling local state
+.claude/
+.copilot/
+
+# Trained model artifacts — too large for git, regenerate via train_lora.py
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Hugging Face / torch caches if accidentally created in repo
+.cache/
+hf_cache/
+wandb/
+runs/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Notebook checkpoints
+.ipynb_checkpoints/
