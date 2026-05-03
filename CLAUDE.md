@@ -112,7 +112,71 @@ Copy these settings exactly when creating a new pod:
 | Pricing | On-Demand $0.69/hr |
 | Connection | Jupyter Lab on port 8888 (do **not** use the older 2.4 PyTorch template — it errored with "layer does not exist" and required retries) |
 
-### 4c. Pod first-boot setup (skip steps 2-4 if reusing the network volume)
+### 4c. Persistent pod setup — do this ONCE, then every future pod is ready in 30 seconds
+
+The pain point: RunPod pods are cattle. Killing a pod wipes everything outside `/workspace` — the OS layer, `~/.bashrc`, `~/.cache/huggingface/token`, and (most painful) all `pip install`s into the system Python. Without persistence, every new pod = ~20 min of reconfigure + reinstall.
+
+**The fix:** put everything that matters onto the network volume. Three artefacts give you a spin-up-to-ready time of ~30 seconds:
+
+#### Artefact 1 — `pod_bootstrap.sh` on `/workspace`
+
+The repo ships [`pod_bootstrap.sh`](pod_bootstrap.sh). On first run it creates `/workspace/.venv` with the exact pinned stack (torch 2.6.0+cu124, bnb 0.45.2, trl 0.11.4, transformers 4.45.2, peft, accelerate, etc.), points HF cache + pip cache at `/workspace/`, and exports the env vars we need (`HF_HOME`, `PYTORCH_CUDA_ALLOC_CONF`, `TOKENIZERS_PARALLELISM`). On every subsequent run it just activates the venv. Total cold-cache install time: ~5 min, ONCE per network volume.
+
+Get it onto `/workspace` once on a fresh pod:
+
+```bash
+cd /workspace && git clone git@github.com:AlexPeppas/qlora-context-compressor.git compressor
+cp /workspace/compressor/pod_bootstrap.sh /workspace/pod_bootstrap.sh
+chmod +x /workspace/pod_bootstrap.sh
+```
+
+(After this, `/workspace/pod_bootstrap.sh` will be on the network volume and survive every future pod.)
+
+#### Artefact 2 — a custom RunPod Pod Template
+
+Saves you from re-picking image + env vars + disk every time. Go to **My Templates → New Template**:
+
+| Field | Value |
+|---|---|
+| Template Name | `compressor-rtx4090` |
+| Container Image | `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04` |
+| Container Disk | `30 GB` |
+| Volume Disk | (leave empty — we use a network volume instead) |
+| Volume Mount Path | `/workspace` |
+| Expose HTTP Ports | `8888` (Jupyter) |
+| Expose TCP Ports | `22` (SSH) |
+| Container Start Command | `bash -lc 'echo "source /workspace/pod_bootstrap.sh" >> /root/.bashrc; sleep infinity'` |
+| Environment Variables | `HF_TOKEN` = `<paste your HF fine-grained token>` (or reference a RunPod Secret) |
+
+The "Container Start Command" is the magic — it appends the bootstrap source line to `~/.bashrc` on every pod boot. So opening a Jupyter terminal or SSH session immediately activates the venv with the HF token, all caches, and you're in `/workspace/compressor`.
+
+#### Artefact 3 — Pod creation flow (the new fast path)
+
+Once Artefacts 1 & 2 exist:
+
+1. **Pods → Deploy → New Pod**
+2. Select your `compressor-rtx4090` template
+3. Attach `compressor_nw_vol` (region locks to EU-RO-1 automatically)
+4. Pick an RTX 4090 (or whatever GPU you want) → Deploy
+
+When the pod comes up, open a terminal — you'll see the bootstrap output ending in:
+```
+[bootstrap] env ready:
+             python: Python 3.11.x
+             torch:  2.6.0+cu124 | CUDA: 12.4 | GPU: NVIDIA GeForce RTX 4090
+             cwd:    /workspace/compressor
+```
+
+That's it. `python -m infer --include-base` or `python -m train_lora` work immediately.
+
+#### When it doesn't work
+
+- **Bootstrap doesn't auto-source on terminal open** — open a fresh terminal once after the start-command ran (race condition on first boot). After the second terminal, every future one will source automatically.
+- **`pip install` errors during first run** — usually a transient PyPI / HF mirror hiccup. Re-source the script (`source /workspace/pod_bootstrap.sh`) and pip will skip already-installed packages.
+- **`torch.cuda.is_available() == False`** — driver/torch CUDA mismatch. Check that you picked a GPU node, not a CPU one. If still broken, the venv may have been built against a different host CUDA — `rm -rf /workspace/.venv` and re-source the bootstrap.
+- **HF auth fails** — verify `HF_TOKEN` env var is set in the Pod Template AND that the token has "Read access to gated repos" scope. The bootstrap writes it to `$HF_HOME/token` on first run.
+
+### 4d. Manual setup (only if `pod_bootstrap.sh` is unavailable)
 
 **Step 1 — environment variables (always run):**
 
