@@ -26,8 +26,13 @@ COMPRESSOR_DIR="$WORKSPACE/compressor"
 
 # ---------------------------------------------------------------------------
 # 1. Persistent caches — point everything cacheable at the network volume
+#
+# Note: HF_HOME defaults to /workspace/.cache/huggingface to align with the
+# location that earlier pod sessions used (and where the ~15 GB Qwen snapshot
+# already lives). Forking it to a different path forces a re-download and
+# nearly busted the network volume quota — see CLAUDE.md section 4c gotchas.
 # ---------------------------------------------------------------------------
-export HF_HOME="$WORKSPACE/hf_cache"
+export HF_HOME="$WORKSPACE/.cache/huggingface"
 export PIP_CACHE_DIR="$PIP_CACHE"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
