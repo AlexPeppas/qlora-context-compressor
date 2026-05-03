@@ -59,7 +59,7 @@ if [ ! -d "$VENV" ]; then
     pip install \
         bitsandbytes==0.45.2 \
         transformers==4.45.2 \
-        peft==0.13.2 \
+        peft==0.14.0 \
         trl==0.11.4 \
         accelerate==1.0.1 \
         datasets==3.0.2 \
