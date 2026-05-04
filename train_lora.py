@@ -51,6 +51,13 @@ Notes
 * Requires a CUDA GPU with ≥24 GB VRAM for the 7B model (≥48 GB for 14B).
 * Set ANTHROPIC_API_KEY in the environment / .env file if you want to call
   the teacher model for additional data generation before training.
+* **EOS supervision invariant** — for chat-template models where ``eos_token``
+  doubles as the assistant-turn terminator (Qwen2.5: ``<|im_end|>``,
+  Llama-3: ``<|eot_id|>``), ``pad_token_id`` MUST be distinct from
+  ``eos_token_id``. The common idiom ``tokenizer.pad_token = tokenizer.eos_token``
+  causes SFTTrainer's collator to mask every legitimate EOS in the labels with
+  -100, so the model never learns to stop. We assert this invariant in
+  ``main()`` and fail loudly if violated.
 """
 from __future__ import annotations
 
@@ -74,7 +81,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_DATASET = str(Path(__file__).parent / "data" / "synthetic_dataset.jsonl")
-DEFAULT_OUTPUT_DIR = str(Path(__file__).parent / "checkpoints" / "qwen2.5-7b-compressor")
+# NOTE: default output dir suffix `-eosfix` distinguishes runs done with the
+# corrected pad_token != eos_token configuration. The original (pre-fix)
+# checkpoints in `qwen2.5-7b-compressor/` are preserved as the broken baseline
+# for the paper's before/after analysis.
+DEFAULT_OUTPUT_DIR = str(Path(__file__).parent / "checkpoints" / "qwen2.5-7b-compressor-eosfix")
 
 LORA_CONFIG = dict(
     r=16,
@@ -316,7 +327,29 @@ def main(argv: list[str] | None = None) -> None:
     # ------------------------------------------------------------------
     logger.info("Loading tokeniser: %s", args.model)
     tokeniser = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    tokeniser.pad_token = tokeniser.eos_token
+    # CRITICAL: do NOT set pad_token = eos_token. SFTTrainer's default collator
+    # masks every pad_token_id from labels with -100. If pad_id == eos_id, every
+    # <|im_end|> (Qwen2.5 EOS) at the end of each training example gets masked
+    # from the loss; the model never learns to predict its own EOS, which
+    # produces severe repetition collapse and budget non-adherence at inference.
+    # Qwen2.5-Instruct ships with pad_token=<|endoftext|> distinct from
+    # eos_token=<|im_end|>; we keep that distinction.
+    assert tokeniser.pad_token_id is not None, (
+        "Tokeniser has no pad_token. Add a dedicated pad token via "
+        "tokeniser.add_special_tokens({'pad_token': '<|pad|>'}) and resize "
+        "model embeddings; do NOT reuse eos_token as pad."
+    )
+    assert tokeniser.pad_token_id != tokeniser.eos_token_id, (
+        f"pad_token_id ({tokeniser.pad_token_id}) must differ from "
+        f"eos_token_id ({tokeniser.eos_token_id}). When they share an id, "
+        f"SFTTrainer masks the legitimate EOS at the end of every training "
+        f"example, breaking stop-token supervision."
+    )
+    logger.info(
+        "Tokeniser pad/eos distinct: pad=%r (id=%d), eos=%r (id=%d)",
+        tokeniser.pad_token, tokeniser.pad_token_id,
+        tokeniser.eos_token, tokeniser.eos_token_id,
+    )
     tokeniser.padding_side = "right"
 
     logger.info("Loading model in 4-bit: %s", args.model)
