@@ -43,19 +43,32 @@ mkdir -p "$HF_HOME" "$PIP_CACHE"
 # ---------------------------------------------------------------------------
 # 2. Venv: create on first run, activate on every run
 # ---------------------------------------------------------------------------
-if [ ! -d "$VENV" ]; then
-    echo "[bootstrap] First run on this network volume — creating venv at $VENV"
+# Sentinel marks a *completed* install. Checking just for the venv directory
+# is unsafe: `python3 -m venv` creates the dir before pip ever runs, so any
+# interruption (pod kill, OOM, network drop during the 2GB torch download)
+# leaves a half-baked venv that the next bootstrap would happily activate
+# and skip reinstall on. The sentinel is only written after the final pip
+# install succeeds, so a partial state always re-triggers a full rebuild.
+VENV_READY="$VENV/.bootstrap_complete"
+
+if [ ! -f "$VENV_READY" ]; then
+    if [ -d "$VENV" ]; then
+        echo "[bootstrap] Detected incomplete venv at $VENV — wiping and rebuilding"
+        rm -rf "$VENV"
+    fi
+    echo "[bootstrap] Creating venv at $VENV"
     python3 -m venv "$VENV"
     # shellcheck disable=SC1091
     source "$VENV/bin/activate"
-    pip install --upgrade pip wheel
+    pip install --upgrade pip wheel || return 1 2>/dev/null || exit 1
 
     echo "[bootstrap] Installing pinned training stack (one-time, ~5 min)"
     # Order matters: torch FIRST with --no-deps to avoid being yanked back to
     # the latest +cu13 wheel by transitive deps from later installs.
     pip install --no-deps \
         torch==2.6.0+cu124 \
-        --index-url https://download.pytorch.org/whl/cu124
+        --index-url https://download.pytorch.org/whl/cu124 \
+        || return 1 2>/dev/null || exit 1
     pip install \
         bitsandbytes==0.45.2 \
         transformers==4.45.2 \
@@ -68,7 +81,10 @@ if [ ! -d "$VENV" ]; then
         python-dotenv \
         anthropic \
         sumy \
-        nltk
+        nltk \
+        || return 1 2>/dev/null || exit 1
+
+    touch "$VENV_READY"
     echo "[bootstrap] venv install complete."
 else
     # shellcheck disable=SC1091
