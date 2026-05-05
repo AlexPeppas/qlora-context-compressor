@@ -69,9 +69,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
-load_dotenv(".env.txt")
+# python-dotenv is optional — train_lora doesn't need ANTHROPIC_API_KEY
+# (only dataset_gen.py does). Don't crash if it's missing on the pod.
+try:
+    from dotenv import load_dotenv  # noqa: PLC0415
+    load_dotenv(".env.txt")
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
