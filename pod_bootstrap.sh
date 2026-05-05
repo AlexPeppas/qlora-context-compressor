@@ -82,6 +82,7 @@ if [ ! -f "$VENV_READY" ]; then
         anthropic \
         sumy \
         nltk \
+        rich \
         || return 1 2>/dev/null || exit 1
 
     touch "$VENV_READY"
