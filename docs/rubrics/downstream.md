@@ -10,7 +10,7 @@ For each source conversation in the bake-off:
 
 1. **Hold out the last assistant turn** before passing to compressors. The compressor only sees turns up to and including the second-to-last assistant turn (the last user turn is preserved as the "test query").
 2. **Each baseline compresses** what they see (same input as faithfulness; the held-out content is invisible to all baselines).
-3. **Continuation generation**: a fresh GPT-4o is given:
+3. **Continuation generation**: a fresh `gpt-5.5` is given:
    ```
    [compressed prior turns from baseline X]
    [user]: <last user turn from source>
@@ -88,7 +88,7 @@ A single Likert score conflates substance, fidelity, and coherence — three sem
 
 ## Notes on baseline parity
 
-All baselines feed compression to the **same** continuation generator (GPT-4o, temperature=0). This isolates the compression quality from the continuation-model quality. Without this, a baseline's downstream score would conflate "is the compression good" with "is the continuation generator good".
+All baselines feed compression to the **same** continuation generator (`gpt-5.5`, temperature=0, pinned snapshot). This isolates the compression quality from the continuation-model quality. Without this, a baseline's downstream score would conflate "is the compression good" with "is the continuation generator good".
 
 ## Validation requirement
 

@@ -14,14 +14,16 @@ Each compression output is graded against a documented rubric by an LLM judge. T
 
 ## Judges
 
-**Two independent LLM judges**, both apply each rubric independently. Headline numbers report the GPT-4o judge. Claude Sonnet judge is reported alongside as a robustness check, plus inter-judge agreement (Cohen's kappa for binary calls; intraclass correlation for ordinal scores).
+**Two independent LLM judges**, both apply each rubric independently. Headline numbers report the GPT-5.5 judge. Claude Sonnet 4.6 judge is reported alongside as a robustness check, plus inter-judge agreement (Cohen's kappa for binary calls; intraclass correlation for ordinal scores).
 
 | Judge | Model ID (planned) | Role |
 |---|---|---|
-| Primary | `gpt-4o-2024-08-06` | Headline scores |
-| Secondary | `claude-sonnet-4-5` (or current Sonnet) | Robustness check + agreement |
+| Primary | `gpt-5.5-<snapshot>` (pin specific snapshot at experiment time) | Headline scores |
+| Secondary | `claude-sonnet-4-6-<snapshot>` (pin specific snapshot at experiment time) | Robustness check + agreement |
 
-**Conflict-of-interest note.** GPT-4o is also one of our baselines (frontier ceiling). To avoid the "judge favors its own outputs" critique, the secondary Claude judge is reported with equal prominence in the paper. If GPT-4o judge and Claude judge disagree on the relative ordering of baselines, that is an explicit reportable finding, not a problem to suppress.
+**Why latest-generation judges, not GPT-4o?** Judge quality is the dominant lever on result validity — a weaker judge introduces noise that can't be recovered downstream. Reproducibility is preserved by pinning snapshot IDs at experiment time.
+
+**Conflict-of-interest note.** GPT-5.5 is also one of our baselines (frontier ceiling). To avoid the "judge favors its own outputs" critique, the secondary Claude Sonnet 4.6 judge is reported with equal prominence in the paper. If GPT-5.5 judge and Claude judge disagree on the relative ordering of baselines, that is an explicit reportable finding, not a problem to suppress.
 
 ## Decoding settings for judges
 
