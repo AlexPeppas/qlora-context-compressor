@@ -1,20 +1,28 @@
 """
-Frontier ceiling baseline — GPT-4o via OpenAI API.
+API-based compressor baselines via OpenAI's chat completions endpoint.
 
-Runs locally (no GPU). Uses the same compression system prompt as base_qwen
-and qwen_lora so the comparison is "what does a frontier model do with the
-same instructions?" — interpreted as a quality ceiling for prompted
-compression.
+Two baselines with different roles:
 
-Decoding: temperature=0 for determinism (re-runs reproduce). The
-`max_completion_tokens` cap mirrors the per-tier caps used by GPU baselines
-(700 / 400 / 200 for recent / mid / old) so compute budget is matched.
+  * `FrontierBaseline`     — GPT-5.5, the quality ceiling. Establishes how
+    much headroom remains between a ~7B QLoRA model and the best available
+    frontier model. NOT meant to be beaten outright; meant to anchor the
+    upper bound.
 
-Cost estimate (GPT-4o pricing, 2024 rates):
-  * Input: $5 / 1M tokens
-  * Output: $15 / 1M tokens
-  * 6 conv x 3 tiers ~ ~80K input tokens + ~10K output tokens = ~$0.55
-  * 40 conv x 3 tiers x 5 systems (this is one of them) ~ ~$5-10 total
+  * `PracticalAPIBaseline` — GPT-4o-mini, the cost-matched API competitor.
+    A realistic "what would a production engineer use off-the-shelf for
+    compression today?" reference. Beating this IS a paper claim.
+
+Both run locally (no GPU) and use the same shared compression system prompt
+as `base_qwen` and `qwen_lora`, so the head-to-head measures the model, not
+the prompt.
+
+Decoding: temperature=0.0 + seed=42 for determinism (re-runs reproduce).
+Snapshot IDs are pinned at experiment time and recorded in the result
+`extras` field so future re-runs can match the model version used.
+
+Cost estimate (current OpenAI pricing as of 2026-05):
+  * GPT-5.5: roughly an order of magnitude pricier per token than GPT-4o-mini
+  * Phase E (~660 generations across both): ~$15-25 total
 
 Auth: requires `OPENAI_API_KEY` in env or `.env` file. The dotenv import is
 optional so the module loads cleanly on the GPU pod where it'll never run.
@@ -32,20 +40,26 @@ from ._qwen_runtime import TIER_MAX_NEW, build_system_prompt
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL = "gpt-4o-2024-08-06"
+# Pin specific snapshots at experiment time. Update these strings to the
+# exact `-YYYY-MM-DD` snapshot used for the published paper run and never
+# change them afterwards — reproducibility hinges on this.
+FRONTIER_MODEL = "gpt-5.5"
+PRACTICAL_MODEL = "gpt-4o-mini"
 
 
-class FrontierBaseline:
-    """OpenAI GPT-4o called with the shared compression prompt.
+class _OpenAICompressor:
+    """Shared implementation for OpenAI-API compressor baselines.
 
-    Deterministic via temperature=0. Same per-tier max-output-token caps
-    as GPU baselines so all prompted compressors see matched budgets.
+    Subclasses set `name` and the default model. Behaviour is otherwise
+    identical so the comparison between frontier and practical-API
+    baselines isolates the model, not the harness.
     """
 
-    name = "gpt-4o"
+    name: str = "openai-base"  # subclasses override
+    default_model: str = ""  # subclasses override
 
-    def __init__(self, model: str = DEFAULT_MODEL, api_key: str | None = None) -> None:
-        self._model = model
+    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
+        self._model = model or self.default_model
         self._api_key = api_key
         self._client: Any = None
 
@@ -54,6 +68,7 @@ class FrontierBaseline:
             return
         try:
             from dotenv import load_dotenv  # noqa: PLC0415
+
             load_dotenv()
         except ImportError:
             pass
@@ -62,20 +77,20 @@ class FrontierBaseline:
         if not api_key:
             raise RuntimeError(
                 "OPENAI_API_KEY not set; either pass api_key=... to "
-                "FrontierBaseline() or set the env var / put it in .env"
+                f"{type(self).__name__}() or set the env var / put it in .env"
             )
 
         from openai import OpenAI  # noqa: PLC0415
 
         self._client = OpenAI(api_key=api_key)
-        logger.info("FrontierBaseline loaded (model=%s).", self._model)
+        logger.info("%s loaded (model=%s).", type(self).__name__, self._model)
 
     def unload(self) -> None:
-        self._client = None  # nothing to release; closing the HTTP pool is automatic
+        self._client = None  # HTTP pool is closed automatically
 
     def compress(self, request: CompressionRequest) -> CompressionResult:
         if self._client is None:
-            raise RuntimeError("FrontierBaseline.load() must be called first")
+            raise RuntimeError(f"{type(self).__name__}.load() must be called first")
 
         max_new = TIER_MAX_NEW[request.turn_age]
         system_msg = build_system_prompt(request.turn_age, request.target_ratio)
@@ -98,7 +113,6 @@ class FrontierBaseline:
 
         # OpenAI's finish_reason vocabulary: "stop" (natural EOS), "length"
         # (max_tokens hit), "content_filter", "tool_calls", "function_call".
-        # We map to our schema: "eos" / "max_new_tokens" / other.
         finish = choice.finish_reason
         if finish == "stop":
             stop_reason, stopped_on_eos = "eos", True
@@ -131,5 +145,23 @@ class FrontierBaseline:
         )
 
 
+class FrontierBaseline(_OpenAICompressor):
+    """Quality ceiling: a large frontier model (GPT-5.5)."""
+
+    name = "frontier-gpt55"
+    default_model = FRONTIER_MODEL
+
+
+class PracticalAPIBaseline(_OpenAICompressor):
+    """Cost-matched API competitor: a smaller production-grade API model
+    (GPT-4o-mini). The realistic alternative a deployment engineer would
+    reach for if they didn't fine-tune their own compressor."""
+
+    name = "practical-gpt4o-mini"
+    default_model = PRACTICAL_MODEL
+
+
 # Verify Protocol conformance at import time
-_baseline: Baseline = FrontierBaseline()  # type: ignore[assignment]
+_b1: Baseline = FrontierBaseline()  # type: ignore[assignment]
+_b2: Baseline = PracticalAPIBaseline()  # type: ignore[assignment]
+
