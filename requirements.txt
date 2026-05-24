@@ -26,6 +26,13 @@ accelerate>=0.29.0
 # torch: base deep-learning framework (install separately per CUDA version)
 torch>=2.2.0
 
+# Eval harness (required for Phase B judges)
+# -------------------------------------------
+# pydantic: structured-output schema for LLM judges (Phase B)
+pydantic>=2.0.0
+# openai: GPT-4o-mini / GPT-5.5 baseline + primary judge (Phase B)
+openai>=1.50.0
+
 # Optional — uncomment for better named-entity extraction
 # --------------------------------------------------------
 # spacy>=3.7.0
