@@ -79,6 +79,36 @@ def test_stage2_prompt_has_both_placeholders():
     assert "{compression}" in p.user_template
 
 
+def test_curator_blocks_are_stripped_before_hash(tmp_path, monkeypatch):
+    """PKM curator auto-injection must not alter the rendered prompt or the
+    content hash. Regression for the 2026-07-04 incident where an Obsidian
+    curator tool injected wiki-link blocks into prompt files."""
+    from compressor.eval import prompts as prompts_mod
+
+    clean = "[SYSTEM]\nyou are a judge\n[USER]\ngrade {x}\n"
+    injected = (
+        clean
+        + "\n%% curator:start %%\n## Related\n- [[faithfulness]]  <!-- score=0.7 -->\n%% curator:end %%\n"
+    )
+
+    clean_file = tmp_path / "clean.md"
+    injected_file = tmp_path / "injected.md"
+    clean_file.write_text(clean, encoding="utf-8")
+    injected_file.write_text(injected, encoding="utf-8")
+
+    monkeypatch.setattr(prompts_mod, "PROMPTS_DIR", tmp_path)
+
+    clean_tpl = prompts_mod.load_prompt("clean")
+    injected_tpl = prompts_mod.load_prompt("injected")
+
+    # The injected block must not appear in the rendered prompt
+    _, user = injected_tpl.render(x="thing")
+    assert "curator" not in user
+    assert "faithfulness" not in user
+    # Hash must match the clean version (block fully stripped)
+    assert injected_tpl.content_hash == clean_tpl.content_hash
+
+
 # ---------------------------------------------------------------------------
 # Stage 1: extraction
 # ---------------------------------------------------------------------------

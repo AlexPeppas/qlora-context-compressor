@@ -54,6 +54,22 @@ class PromptTemplate:
 
 _SECTION_RE = re.compile(r"^\[(SYSTEM|USER)\]\s*$", re.MULTILINE)
 
+# PKM / note-curator tools (e.g. the Obsidian-style "curator") auto-inject
+# `%% curator:start %% ... %% curator:end %%` link blocks into markdown files.
+# Prompt files are the measurement instrument: their content is sent to the
+# judge verbatim AND their content-hash drives the judge cache key. We strip
+# these blocks defensively so an external tool can never silently alter a
+# prompt or invalidate the cache. See conversation 2026-07-04.
+_CURATOR_BLOCK_RE = re.compile(
+    r"\n*%%\s*curator:start\s*%%.*?%%\s*curator:end\s*%%\n*",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_injected_blocks(content: str) -> str:
+    """Remove auto-injected curator link blocks before parsing/hashing."""
+    return _CURATOR_BLOCK_RE.sub("\n", content).strip() + "\n"
+
 
 def _parse_prompt_file(content: str) -> tuple[str, str]:
     """Parse a prompt file into (system, user) sections.
@@ -80,12 +96,14 @@ def _parse_prompt_file(content: str) -> tuple[str, str]:
 def load_prompt(name: str) -> PromptTemplate:
     """Load a prompt template by name (without `.md` extension).
 
-    The file `{name}.md` must exist in this directory.
+    The file `{name}.md` must exist in this directory. Auto-injected PKM
+    curator blocks are stripped before parsing and hashing so external
+    note-management tools cannot alter the prompt or the cache key.
     """
     path = PROMPTS_DIR / f"{name}.md"
     if not path.exists():
         raise FileNotFoundError(f"prompt template not found: {path}")
-    content = path.read_text(encoding="utf-8")
+    content = _strip_injected_blocks(path.read_text(encoding="utf-8"))
     system, user = _parse_prompt_file(content)
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return PromptTemplate(
