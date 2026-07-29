@@ -17,6 +17,7 @@ from . import Baseline, CompressionRequest, CompressionResult
 from ._qwen_runtime import (
     TIER_MAX_NEW,
     build_qwen_chat_prompt,
+    generate,
     greedy_generate,
     load_base_qwen_4bit,
 )
@@ -32,13 +33,31 @@ class QwenLoRABaseline:
     one instance per checkpoint — the base model is loaded lazily so the
     overhead is only the small adapter weights per extra checkpoint.
 
+    Decoding: greedy by default (deterministic, the primary/headline run).
+    Pass `sample_seed` (with optional temperature/top_p) to run sampled
+    decoding for the 3-seed robustness study (Phase B.7). When sampling, the
+    seed is recorded in the result `extras` and appended to `name` so the
+    three seed runs are distinguishable in the output JSONL.
+
     For multi-adapter A/B with shared base memory, prefer the legacy
     `infer.py:run_bake_off()` path until we extend this class.
     """
 
-    def __init__(self, adapter_path: str | Path, name: str) -> None:
+    def __init__(
+        self,
+        adapter_path: str | Path,
+        name: str,
+        *,
+        sample_seed: int | None = None,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+    ) -> None:
         self._adapter_path = Path(adapter_path)
-        self.name = name
+        self._sample_seed = sample_seed
+        self._temperature = temperature
+        self._top_p = top_p
+        # Distinguish seeded sampled runs in the output source label
+        self.name = name if sample_seed is None else f"{name}-s{sample_seed}"
         self._model: Any = None
         self._tokenizer: Any = None
         self._adapter_name = "primary"
@@ -100,9 +119,32 @@ class QwenLoRABaseline:
             request.conversation, request.turn_age, request.target_ratio
         )
         with self._adapter_active():
-            gen = greedy_generate(self._model, self._tokenizer, prompt, max_new)
+            if self._sample_seed is not None:
+                gen = generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt,
+                    max_new,
+                    do_sample=True,
+                    temperature=self._temperature,
+                    top_p=self._top_p,
+                    seed=self._sample_seed,
+                )
+            else:
+                gen = greedy_generate(self._model, self._tokenizer, prompt, max_new)
 
         text = gen["text"]
+        extras: dict[str, Any] = {"adapter_path": str(self._adapter_path)}
+        if self._sample_seed is not None:
+            extras.update(
+                decode="sampled",
+                decode_seed=self._sample_seed,
+                temperature=self._temperature,
+                top_p=self._top_p,
+            )
+        else:
+            extras["decode"] = "greedy"
+
         return CompressionResult(
             conversation_id=request.conversation_id,
             scenario_type=request.scenario_type,
@@ -119,7 +161,7 @@ class QwenLoRABaseline:
             max_new_tokens=gen["max_new_tokens"],
             stop_reason=gen["stop_reason"],
             stopped_on_eos=gen["stopped_on_eos"],
-            extras={"adapter_path": str(self._adapter_path)},
+            extras=extras,
         )
 
 

@@ -110,20 +110,40 @@ def greedy_generate(
     prompt: str,
     max_new_tokens: int,
 ) -> dict[str, Any]:
-    """Greedy-decode one continuation. Returns a dict with text + token-level
-    metadata (counts, stop reason). Greedy is deterministic so re-runs match.
+    """Greedy-decode one continuation (deterministic). Thin wrapper over
+    `generate()` kept for backward compatibility with existing callers."""
+    return generate(model, tokenizer, prompt, max_new_tokens, do_sample=False)
+
+
+def generate(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    max_new_tokens: int,
+    *,
+    do_sample: bool = False,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Decode one continuation. Greedy by default (deterministic); pass
+    do_sample=True with a `seed` for reproducible sampled decoding (used by
+    the 3-seed robustness runs for OURS — Phase B.7).
 
     The returned dict is shaped to flow directly into CompressionResult fields:
 
-        text:                 str   decoded continuation, special tokens stripped
-        gen_seconds:          float wall-clock of model.generate()
-        input_tokens:         int   prompt length in tokens
-        output_tokens:        int   number of NEW tokens generated
-        max_new_tokens:       int   the budget that was passed in
-        stop_reason:          str   "eos" | "max_new_tokens"
-        stopped_on_eos:       bool  whether the last new token was eos
+        text, gen_seconds, input_tokens, output_tokens, max_new_tokens,
+        stop_reason ("eos" | "max_new_tokens"), stopped_on_eos,
+        and (when sampling) decode_seed / temperature / top_p.
     """
     import torch
+
+    if do_sample and seed is not None:
+        # Seed all RNGs the sampler draws from so a (model, prompt, seed)
+        # triple reproduces exactly.
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     eos_id = tokenizer.convert_tokens_to_ids(QWEN_EOS_TOKEN)
     inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(
@@ -131,29 +151,30 @@ def greedy_generate(
     )
     n_prompt = inputs["input_ids"].shape[1]
 
+    gen_kwargs: dict[str, Any] = dict(
+        max_new_tokens=max_new_tokens,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=eos_id,
+        do_sample=do_sample,
+    )
+    if do_sample:
+        gen_kwargs.update(temperature=temperature, top_p=top_p)
+
     t0 = time.time()
     with torch.inference_mode():
-        out = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=eos_id,
-        )
+        out = model.generate(**inputs, **gen_kwargs)
     dt = time.time() - t0
 
     new_token_ids = out[0, n_prompt:]
     output_tokens = int(new_token_ids.shape[0])
 
-    # Stop reason: if the last token is EOS, generation halted naturally;
-    # otherwise we hit the cap. (HF returns at most max_new_tokens new tokens.)
     last_tok = int(new_token_ids[-1].item()) if output_tokens > 0 else -1
     stopped_on_eos = last_tok == eos_id
     stop_reason = "eos" if stopped_on_eos else "max_new_tokens"
 
     text = tokenizer.decode(new_token_ids, skip_special_tokens=True).strip()
 
-    return {
+    result = {
         "text": text,
         "gen_seconds": dt,
         "input_tokens": n_prompt,
@@ -162,3 +183,6 @@ def greedy_generate(
         "stop_reason": stop_reason,
         "stopped_on_eos": stopped_on_eos,
     }
+    if do_sample:
+        result.update(decode_seed=seed, temperature=temperature, top_p=top_p)
+    return result
