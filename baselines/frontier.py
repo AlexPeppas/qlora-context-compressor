@@ -35,6 +35,7 @@ import time
 from typing import Any
 
 from . import Baseline, CompressionRequest, CompressionResult
+from ._openai_compat import openai_chat_create
 from ._qwen_runtime import TIER_MAX_NEW, build_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -43,8 +44,10 @@ logger = logging.getLogger(__name__)
 # Pin specific snapshots at experiment time. Update these strings to the
 # exact `-YYYY-MM-DD` snapshot used for the published paper run and never
 # change them afterwards — reproducibility hinges on this.
-FRONTIER_MODEL = "gpt-5.5"
-PRACTICAL_MODEL = "gpt-4o-mini"
+# Verified available 2026-08-09: gpt-5.5 does not exist; gpt-5.4 is the
+# latest 5-series. Pinned to dated snapshots for reproducibility.
+FRONTIER_MODEL = "gpt-5.4-2026-03-05"
+PRACTICAL_MODEL = "gpt-4o-mini-2024-07-18"
 
 
 class _OpenAICompressor:
@@ -96,13 +99,14 @@ class _OpenAICompressor:
         system_msg = build_system_prompt(request.turn_age, request.target_ratio)
 
         t0 = time.time()
-        completion = self._client.chat.completions.create(
+        completion = openai_chat_create(
+            self._client,
             model=self._model,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": request.conversation},
             ],
-            max_tokens=max_new,
+            max_output_tokens=max_new,
             temperature=0.0,
             seed=42,
         )
@@ -146,9 +150,9 @@ class _OpenAICompressor:
 
 
 class FrontierBaseline(_OpenAICompressor):
-    """Quality ceiling: a large frontier model (GPT-5.5)."""
+    """Quality ceiling: a large frontier model (GPT-5.4)."""
 
-    name = "frontier-gpt55"
+    name = "frontier-gpt54"
     default_model = FRONTIER_MODEL
 
 
