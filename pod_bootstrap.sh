@@ -49,44 +49,82 @@ mkdir -p "$HF_HOME" "$PIP_CACHE"
 # leaves a half-baked venv that the next bootstrap would happily activate
 # and skip reinstall on. The sentinel is only written after the final pip
 # install succeeds, so a partial state always re-triggers a full rebuild.
-VENV_READY="$VENV/.bootstrap_complete"
+VENV_READY="$VENV/.bootstrap_complete_eval_v2"
+LEGACY_VENV_READY="$VENV/.bootstrap_complete"
 
 if [ ! -f "$VENV_READY" ]; then
-    if [ -d "$VENV" ]; then
-        echo "[bootstrap] Detected incomplete venv at $VENV — wiping and rebuilding"
-        rm -rf "$VENV"
+    if [ -f "$LEGACY_VENV_READY" ]; then
+        # Upgrade an already-complete persistent environment in place. Rebuilding
+        # would needlessly re-download the multi-GB CUDA torch wheel.
+        # shellcheck disable=SC1091
+        source "$VENV/bin/activate"
+        echo "[bootstrap] Adding pod experiment dependencies to existing venv"
+        pip install \
+            bitsandbytes==0.45.2 \
+            transformers==4.45.2 \
+            peft==0.14.0 \
+            trl==0.11.4 \
+            accelerate==1.0.1 \
+            datasets==3.0.2 \
+            hf_transfer \
+            sentencepiece \
+            python-dotenv \
+            anthropic \
+            openai \
+            scipy \
+            pydantic \
+            llmlingua==0.2.2 \
+            sumy \
+            nltk \
+            rich \
+            || return 1 2>/dev/null || exit 1
+        # Reassert the CUDA-compatible torch wheel after dependency resolution.
+        pip install --force-reinstall --no-deps \
+            torch==2.6.0+cu124 \
+            --index-url https://download.pytorch.org/whl/cu124 \
+            || return 1 2>/dev/null || exit 1
+        touch "$VENV_READY"
+    else
+        if [ -d "$VENV" ]; then
+            echo "[bootstrap] Detected incomplete venv at $VENV — wiping and rebuilding"
+            rm -rf "$VENV"
+        fi
+        echo "[bootstrap] Creating venv at $VENV"
+        python3 -m venv "$VENV"
+        # shellcheck disable=SC1091
+        source "$VENV/bin/activate"
+        pip install --upgrade pip wheel || return 1 2>/dev/null || exit 1
+
+        echo "[bootstrap] Installing pinned training stack (one-time, ~5 min)"
+        # Order matters: torch FIRST with --no-deps to avoid being yanked back to
+        # the latest +cu13 wheel by transitive deps from later installs.
+        pip install --no-deps \
+            torch==2.6.0+cu124 \
+            --index-url https://download.pytorch.org/whl/cu124 \
+            || return 1 2>/dev/null || exit 1
+        pip install \
+            bitsandbytes==0.45.2 \
+            transformers==4.45.2 \
+            peft==0.14.0 \
+            trl==0.11.4 \
+            accelerate==1.0.1 \
+            datasets==3.0.2 \
+            hf_transfer \
+            sentencepiece \
+            python-dotenv \
+            anthropic \
+            openai \
+            scipy \
+            pydantic \
+            llmlingua==0.2.2 \
+            sumy \
+            nltk \
+            rich \
+            || return 1 2>/dev/null || exit 1
+
+        touch "$LEGACY_VENV_READY" "$VENV_READY"
+        echo "[bootstrap] venv install complete."
     fi
-    echo "[bootstrap] Creating venv at $VENV"
-    python3 -m venv "$VENV"
-    # shellcheck disable=SC1091
-    source "$VENV/bin/activate"
-    pip install --upgrade pip wheel || return 1 2>/dev/null || exit 1
-
-    echo "[bootstrap] Installing pinned training stack (one-time, ~5 min)"
-    # Order matters: torch FIRST with --no-deps to avoid being yanked back to
-    # the latest +cu13 wheel by transitive deps from later installs.
-    pip install --no-deps \
-        torch==2.6.0+cu124 \
-        --index-url https://download.pytorch.org/whl/cu124 \
-        || return 1 2>/dev/null || exit 1
-    pip install \
-        bitsandbytes==0.45.2 \
-        transformers==4.45.2 \
-        peft==0.14.0 \
-        trl==0.11.4 \
-        accelerate==1.0.1 \
-        datasets==3.0.2 \
-        hf_transfer \
-        sentencepiece \
-        python-dotenv \
-        anthropic \
-        sumy \
-        nltk \
-        rich \
-        || return 1 2>/dev/null || exit 1
-
-    touch "$VENV_READY"
-    echo "[bootstrap] venv install complete."
 else
     # shellcheck disable=SC1091
     source "$VENV/bin/activate"

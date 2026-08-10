@@ -279,6 +279,7 @@ def pull_and_ingest(
     *,
     limit: int | None = None,
     hf_split: str = "train",
+    revision: str | None = None,
 ) -> int:
     """Pull a dataset from HF, adapt + filter, write structured JSONL.
     Returns the number of conversations written. Requires `datasets`."""
@@ -289,7 +290,12 @@ def pull_and_ingest(
     n_skipped = 0
 
     if dataset_name == "wildchat":
-        ds = load_dataset("allenai/WildChat-1M", split=hf_split, streaming=True)
+        ds = load_dataset(
+            "allenai/WildChat-1M",
+            split=hf_split,
+            streaming=True,
+            revision=revision,
+        )
         for i, row in enumerate(ds):
             n_seen += 1
             res = adapt_wildchat(row, idx=i)
@@ -300,7 +306,12 @@ def pull_and_ingest(
             if limit and len(kept) >= limit:
                 break
     elif dataset_name == "ultrachat":
-        ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft", streaming=True)
+        ds = load_dataset(
+            "HuggingFaceH4/ultrachat_200k",
+            split="train_sft",
+            streaming=True,
+            revision=revision,
+        )
         for i, row in enumerate(ds):
             n_seen += 1
             res = adapt_ultrachat(row, idx=i)
@@ -311,7 +322,7 @@ def pull_and_ingest(
             if limit and len(kept) >= limit:
                 break
     elif dataset_name == "oasst2":
-        ds = load_dataset("OpenAssistant/oasst2", split="train")
+        ds = load_dataset("OpenAssistant/oasst2", split="train", revision=revision)
         for tree_id, thread in _walk_oasst_trees(ds):
             n_seen += 1
             res = adapt_oasst_thread(thread, tree_id=tree_id)
@@ -322,7 +333,11 @@ def pull_and_ingest(
             if limit and len(kept) >= limit:
                 break
     elif dataset_name == "mtbench":
-        ds = load_dataset("HuggingFaceH4/mt_bench_prompts", split="train")
+        ds = load_dataset(
+            "HuggingFaceH4/mt_bench_prompts",
+            split="train",
+            revision=revision,
+        )
         for i, row in enumerate(ds):
             n_seen += 1
             res = adapt_mtbench(row, idx=i)
