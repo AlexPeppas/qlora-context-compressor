@@ -23,8 +23,8 @@ What it does
 
 Compute placement
 -----------------
-GPU baselines run on the pod; this orchestrator runs LOCALLY (judges are just
-API calls). Point it at the pulled-down compression JSONLs.
+GPU baselines and this orchestrator may run on the pod so the revision-pinned
+corpus and compression artifacts never need to be moved before evaluation.
 
 Caching
 -------
@@ -120,28 +120,30 @@ def run_faithfulness(
     Stage 1 (item extraction) is computed once per (conversation, judge) and
     reused across every system/tier compression of that conversation.
     """
-    # 1. Stage 1 per (conversation, judge)
-    stage1: dict[tuple[str, str], Any] = {}  # (conv_id, judge) -> (items, result)
+    if not judges:
+        raise ValueError("run_faithfulness requires at least one judge")
+
+    # Stage 1 is shared so both judges label the same critical-item list.
+    extractor = judges[0]
+    stage1: dict[str, Any] = {}
     conv_ids = sorted({r.conversation_id for r in comp_rows})
     for cid in conv_ids:
         conv = conversations[cid]
         source_text = conv.flatten()
-        for judge in judges:
-            key = (cid, judge.name)
-            cached = cache.get_faithfulness_stage1(cid, judge.name)
-            if cached is not None:
-                stage1[key] = cached
-                continue
-            items, result = m_faith.extract_critical_items(source_text, judge)
-            cache.put_faithfulness_stage1(cid, judge.name, items, result)
-            stage1[key] = (items, result)
+        cached = cache.get_faithfulness_stage1(cid, extractor.name)
+        if cached is not None:
+            stage1[cid] = cached
+            continue
+        items, result = m_faith.extract_critical_items(source_text, extractor)
+        cache.put_faithfulness_stage1(cid, extractor.name, items, result)
+        stage1[cid] = (items, result)
 
     # 2. Stage 2 per (compression row, judge)
     scores: dict[tuple[str, str, str], dict[str, float]] = defaultdict(dict)
     for row in comp_rows:
         source_text = conversations[row.conversation_id].flatten()
         for judge in judges:
-            items, s1 = stage1[(row.conversation_id, judge.name)]
+            items, s1 = stage1[row.conversation_id]
             cached_score = cache.get_faithfulness_score(
                 row.conversation_id, row.source, row.turn_age, judge.name
             )
@@ -162,6 +164,70 @@ def run_faithfulness(
                 row.conversation_id, row.source, row.turn_age, judge.name, ev
             )
             scores[(row.conversation_id, row.source, row.turn_age)][judge.name] = score
+    return scores
+
+
+def run_downstream(
+    comp_rows: Sequence[CompressionRow],
+    generator: JudgeClient,
+    judges: Sequence[JudgeClient],
+    cache: JudgeCache,
+) -> dict[tuple[str, str, str], dict[str, float]]:
+    """Generate once per row, then score with each judge; all calls resume."""
+    scores: dict[tuple[str, str, str], dict[str, float]] = defaultdict(dict)
+    for row in comp_rows:
+        if row.last_user_turn is None or row.held_assistant_turn is None:
+            raise ValueError(
+                f"downstream row missing holdout fields: "
+                f"{row.conversation_id}/{row.source}/{row.turn_age}"
+            )
+        cached_continuation = cache.get_downstream_continuation(
+            row.conversation_id, row.source, row.turn_age, generator.name
+        )
+        if cached_continuation is None:
+            continuation, generation_result = m_downstream.generate_continuation(
+                row.compressed, row.last_user_turn, generator
+            )
+            cache.put_downstream_continuation(
+                row.conversation_id,
+                row.source,
+                row.turn_age,
+                generator.name,
+                continuation,
+                generation_result,
+            )
+        else:
+            continuation, _generation_result = cached_continuation
+
+        for judge in judges:
+            cached_score = cache.get_downstream_score(
+                row.conversation_id,
+                row.source,
+                row.turn_age,
+                generator.name,
+                judge.name,
+            )
+            if cached_score is None:
+                axes, result = m_downstream.score_continuation(
+                    row.last_user_turn,
+                    continuation,
+                    row.held_assistant_turn,
+                    judge,
+                )
+                cache.put_downstream_score(
+                    row.conversation_id,
+                    row.source,
+                    row.turn_age,
+                    generator.name,
+                    judge.name,
+                    axes,
+                    result,
+                )
+            else:
+                axes, _result = cached_score
+            scores[(row.conversation_id, row.source, row.turn_age)][
+                judge.name
+            ] = axes.per_row_score()
     return scores
 
 
@@ -228,6 +294,71 @@ def aggregate_faithfulness(
     return out
 
 
+def inter_judge_agreement(
+    scores: dict[tuple[str, str, str], dict[str, float]],
+    *,
+    labels: dict[tuple[str, str, str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    judges = sorted({judge for per_judge in scores.values() for judge in per_judge})
+    if len(judges) != 2:
+        return {"status": "requires_exactly_two_judges", "judges": judges}
+
+    ratings = [
+        [per_judge[judges[0]], per_judge[judges[1]]]
+        for per_judge in scores.values()
+        if all(judge in per_judge for judge in judges)
+    ]
+    out: dict[str, Any] = {
+        "judges": judges,
+        "n_shared_rows": len(ratings),
+        "icc21": m_stats.icc21(ratings) if len(ratings) >= 2 else None,
+    }
+    if out["icc21"] is not None:
+        out["icc_band"] = _agreement_band(out["icc21"], acceptable=0.5, marginal=0.3)
+    if labels is not None:
+        by_judge: dict[str, dict[tuple[str, str, str, int], str]] = {
+            judge: {} for judge in judges
+        }
+        current_score_keys = {
+            (cid, system, tier, judge)
+            for (cid, system, tier), per_judge in scores.items()
+            for judge in per_judge
+        }
+        for (cid, system, tier, judge), decisions in labels.items():
+            if (
+                judge not in by_judge
+                or (cid, system, tier, judge) not in current_score_keys
+            ):
+                continue
+            for decision in decisions:
+                by_judge[judge][(cid, system, tier, int(decision["id"]))] = decision[
+                    "present"
+                ]
+        shared = sorted(set(by_judge[judges[0]]) & set(by_judge[judges[1]]))
+        labels_a = [by_judge[judges[0]][key] for key in shared]
+        labels_b = [by_judge[judges[1]][key] for key in shared]
+        binary_a = ["present" if label == "present" else "not_present" for label in labels_a]
+        binary_b = ["present" if label == "present" else "not_present" for label in labels_b]
+        out.update(
+            n_shared_item_calls=len(shared),
+            kappa_ternary=m_stats.cohens_kappa(labels_a, labels_b) if shared else None,
+            kappa_binary=m_stats.cohens_kappa(binary_a, binary_b) if shared else None,
+        )
+        if out["kappa_binary"] is not None:
+            out["kappa_band"] = _agreement_band(
+                out["kappa_binary"], acceptable=0.4, marginal=0.2
+            )
+    return out
+
+
+def _agreement_band(value: float, *, acceptable: float, marginal: float) -> str:
+    if value >= acceptable:
+        return "acceptable"
+    if value >= marginal:
+        return "marginal"
+    return "unacceptable"
+
+
 def aggregate_tier(
     scores: dict[tuple[str, str, str], dict[str, float]],
     *,
@@ -266,7 +397,7 @@ def aggregate_tier(
 
 def _build_judges(spec: str) -> list[JudgeClient]:
     """spec is a comma-separated list of judge specs 'backend:model:name'.
-    e.g. 'openai:gpt-5.5:gpt-primary,anthropic:claude-sonnet-4-6:claude-secondary'"""
+    e.g. 'openai:gpt-5.4-2026-03-05:gpt-primary,anthropic:claude-sonnet-4-6:claude-secondary'"""
     from .llm_client import AnthropicJudgeClient, MockJudgeClient, OpenAIJudgeClient
 
     judges: list[JudgeClient] = []
@@ -297,11 +428,25 @@ def main() -> None:
                    help="JSONL of compression outputs (any set of systems).")
     p.add_argument("--conversations", type=Path, required=True,
                    help="Structured-turn source conversations JSONL.")
+    p.add_argument(
+        "--downstream-compressions",
+        type=Path,
+        help="Holdout-safe compression JSONL required by the downstream metric.",
+    )
     p.add_argument("--our-system", default="tfix375",
                    help="System name treated as 'ours' in paired tests.")
+    p.add_argument(
+        "--systems",
+        help="Optional comma-separated source names to include.",
+    )
     p.add_argument("--judges",
-                   default="openai:gpt-5.5:gpt-primary,anthropic:claude-sonnet-4-6:claude-secondary",
+                   default="openai:gpt-5.4-2026-03-05:gpt-primary,anthropic:claude-sonnet-4-6:claude-secondary",
                    help="Comma-separated backend:model:name judge specs.")
+    p.add_argument(
+        "--generator",
+        default="openai:gpt-5.4-2026-03-05:continuation-generator",
+        help="Single backend:model:name used identically for all downstream rows.",
+    )
     p.add_argument("--cache", type=Path, default=Path("data/pilot_judge_cache.jsonl"))
     p.add_argument("--out", type=Path, default=Path("data/pilot_results.json"))
     p.add_argument("--metrics", default="faithfulness,tier",
@@ -312,6 +457,23 @@ def main() -> None:
     args = p.parse_args()
 
     comp_rows = load_compression_rows(args.compressions)
+    downstream_rows = (
+        load_compression_rows(args.downstream_compressions)
+        if args.downstream_compressions
+        else []
+    )
+    if args.systems:
+        selected_systems = {
+            system.strip() for system in args.systems.split(",") if system.strip()
+        }
+        available = {row.source for row in comp_rows}
+        missing = selected_systems - available
+        if missing:
+            p.error(f"--systems names not found in standard rows: {sorted(missing)}")
+        comp_rows = [row for row in comp_rows if row.source in selected_systems]
+        downstream_rows = [
+            row for row in downstream_rows if row.source in selected_systems
+        ]
     conv_list = load_conversations(args.conversations)
     conversations = {c.id: c for c in conv_list}
     metrics = {m.strip() for m in args.metrics.split(",") if m.strip()}
@@ -327,14 +489,31 @@ def main() -> None:
     if args.dry_run:
         judges = args.judges.split(",")
         n_conv = len({r.conversation_id for r in comp_rows})
-        n_stage1 = n_conv * len(judges)
+        n_stage1 = n_conv
         n_stage2 = len(comp_rows) * len(judges)
-        n_down = len([r for r in comp_rows if r.last_user_turn]) * (len(judges) + 1)
+        n_down = len(downstream_rows) * (len(judges) + 1)
         logger.info("[dry-run] planned judge calls:")
-        logger.info("  faithfulness Stage 1 (per conv x judge): %d", n_stage1)
-        logger.info("  faithfulness Stage 2 (per row x judge):  %d", n_stage2)
+        if "faithfulness" in metrics or "tier" in metrics:
+            logger.info("  faithfulness Stage 1 (shared per conv): %d", n_stage1)
+            logger.info("  faithfulness Stage 2 (per row x judge): %d", n_stage2)
         if "downstream" in metrics:
-            logger.info("  downstream (gen + score, per row):       ~%d", n_down)
+            if not downstream_rows:
+                p.error("--downstream-compressions is required for downstream")
+            missing_holdouts = sum(
+                row.last_user_turn is None or row.held_assistant_turn is None
+                for row in downstream_rows
+            )
+            if missing_holdouts:
+                p.error(
+                    f"{missing_holdouts} downstream rows are missing holdout fields"
+                )
+            logger.info("  downstream generation calls:             %d", len(downstream_rows))
+            logger.info(
+                "  downstream judge scoring calls:            %d",
+                len(downstream_rows) * len(judges),
+            )
+            logger.info("  downstream total calls:                    %d", n_down)
+            logger.info("  continuation generator: %s", args.generator)
         logger.info("  judges: %s", judges)
         logger.info("[dry-run] no API calls fired.")
         return
@@ -356,6 +535,29 @@ def main() -> None:
             results["tier_appropriate"] = aggregate_tier(
                 faith_scores, our_system=args.our_system
             )
+        results["faithfulness_agreement"] = inter_judge_agreement(
+            faith_scores, labels=cache.faithfulness_labels()
+        )
+
+    if "downstream" in metrics:
+        if not downstream_rows:
+            p.error("--downstream-compressions is required for downstream")
+        generators = _build_judges(args.generator)
+        if len(generators) != 1:
+            p.error("--generator must contain exactly one backend:model:name spec")
+        logger.info("Running M_downstream ...")
+        downstream_scores = run_downstream(
+            downstream_rows, generators[0], judges, cache
+        )
+        results["downstream"] = aggregate_faithfulness(
+            downstream_scores,
+            our_system=args.our_system,
+            seed=args.seed,
+            n_boot=args.n_boot,
+        )
+        results["downstream_agreement"] = inter_judge_agreement(
+            downstream_scores
+        )
 
     if "sanity" in metrics:
         logger.info("Running sanity metrics ...")

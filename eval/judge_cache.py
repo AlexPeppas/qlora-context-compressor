@@ -34,6 +34,11 @@ class JudgeCache:
         self.path = Path(path)
         self._stage1: dict[tuple[str, str], dict] = {}
         self._scores: dict[tuple[str, str, str, str], float] = {}
+        self._faithfulness_labels: dict[
+            tuple[str, str, str, str], list[dict[str, Any]]
+        ] = {}
+        self._continuations: dict[tuple[str, str, str, str], dict] = {}
+        self._downstream_scores: dict[tuple[str, str, str, str, str], dict] = {}
         self._load()
 
     # -- loading -----------------------------------------------------------
@@ -50,13 +55,43 @@ class JudgeCache:
             if kind == "stage1":
                 self._stage1[(rec["conversation_id"], rec["judge"])] = rec
             elif kind == "score":
-                self._scores[
-                    (rec["conversation_id"], rec["system"], rec["tier"], rec["judge"])
-                ] = rec["score"]
+                key = (
+                    rec["conversation_id"],
+                    rec["system"],
+                    rec["tier"],
+                    rec["judge"],
+                )
+                self._scores[key] = rec["score"]
+                if rec.get("decisions"):
+                    self._faithfulness_labels[key] = rec["decisions"]
+            elif kind == "downstream_continuation":
+                self._continuations[
+                    (
+                        rec["conversation_id"],
+                        rec["system"],
+                        rec["tier"],
+                        rec["generator"],
+                    )
+                ] = rec
+            elif kind == "downstream_score":
+                self._downstream_scores[
+                    (
+                        rec["conversation_id"],
+                        rec["system"],
+                        rec["tier"],
+                        rec["generator"],
+                        rec["judge"],
+                    )
+                ] = rec
             n += 1
         logger.info(
-            "Loaded judge cache: %d stage1, %d scores from %s",
-            len(self._stage1), len(self._scores), self.path,
+            "Loaded judge cache: %d stage1, %d faithfulness scores, "
+            "%d continuations, %d downstream scores from %s",
+            len(self._stage1),
+            len(self._scores),
+            len(self._continuations),
+            len(self._downstream_scores),
+            self.path,
         )
 
     def _append(self, record: dict[str, Any]) -> None:
@@ -135,7 +170,10 @@ class JudgeCache:
         evaluation: Any,
     ) -> None:
         score = evaluation.score.score
-        self._scores[(conversation_id, system, tier, judge_name)] = score
+        key = (conversation_id, system, tier, judge_name)
+        decisions = [decision.model_dump() for decision in evaluation.decisions]
+        self._scores[key] = score
+        self._faithfulness_labels[key] = decisions
         rec = {
             "kind": "score",
             "conversation_id": conversation_id,
@@ -144,7 +182,113 @@ class JudgeCache:
             "judge": judge_name,
             "score": score,
             "detail": evaluation.score.to_dict(),
+            "decisions": decisions,
         }
+        self._append(rec)
+
+    def faithfulness_labels(
+        self,
+    ) -> dict[tuple[str, str, str, str], list[dict[str, Any]]]:
+        return dict(self._faithfulness_labels)
+
+    # -- downstream continuation + scoring -------------------------------
+
+    @staticmethod
+    def _restore_result(record: dict[str, Any], parsed: Any) -> Any:
+        from .llm_client import JudgeProvenance, JudgeResult, TokenUsage
+
+        stored = record["result"]
+        provenance = stored["provenance"]
+        usage = stored.get("usage", {})
+        return JudgeResult(
+            parsed=parsed,
+            raw=stored.get("raw", ""),
+            provenance=JudgeProvenance(**provenance),
+            usage=TokenUsage(**usage),
+            wall_seconds=float(stored.get("wall_seconds", 0.0)),
+            extras=stored.get("extras", {}),
+        )
+
+    def get_downstream_continuation(
+        self,
+        conversation_id: str,
+        system: str,
+        tier: str,
+        generator_name: str,
+    ) -> tuple[str, Any] | None:
+        rec = self._continuations.get(
+            (conversation_id, system, tier, generator_name)
+        )
+        if rec is None:
+            return None
+        from .downstream import ContinuationText
+
+        text = rec["continuation"]
+        result = self._restore_result(rec, ContinuationText(text=text))
+        return text, result
+
+    def put_downstream_continuation(
+        self,
+        conversation_id: str,
+        system: str,
+        tier: str,
+        generator_name: str,
+        continuation: str,
+        result: Any,
+    ) -> None:
+        rec = {
+            "kind": "downstream_continuation",
+            "conversation_id": conversation_id,
+            "system": system,
+            "tier": tier,
+            "generator": generator_name,
+            "continuation": continuation,
+            "result": result.to_dict(),
+        }
+        self._continuations[(conversation_id, system, tier, generator_name)] = rec
+        self._append(rec)
+
+    def get_downstream_score(
+        self,
+        conversation_id: str,
+        system: str,
+        tier: str,
+        generator_name: str,
+        judge_name: str,
+    ) -> tuple[Any, Any] | None:
+        rec = self._downstream_scores.get(
+            (conversation_id, system, tier, generator_name, judge_name)
+        )
+        if rec is None:
+            return None
+        from .downstream import AxisScores
+
+        axes = AxisScores(**rec["axes"])
+        return axes, self._restore_result(rec, axes)
+
+    def put_downstream_score(
+        self,
+        conversation_id: str,
+        system: str,
+        tier: str,
+        generator_name: str,
+        judge_name: str,
+        axes: Any,
+        result: Any,
+    ) -> None:
+        rec = {
+            "kind": "downstream_score",
+            "conversation_id": conversation_id,
+            "system": system,
+            "tier": tier,
+            "generator": generator_name,
+            "judge": judge_name,
+            "axes": axes.model_dump(),
+            "result": result.to_dict(),
+        }
+        self._downstream_scores[
+            (conversation_id, system, tier, generator_name, judge_name)
+        ] = rec
         self._append(rec)
 
 

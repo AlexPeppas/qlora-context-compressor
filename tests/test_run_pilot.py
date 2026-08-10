@@ -12,6 +12,7 @@ import json
 import pytest
 
 from compressor.eval.conversations import Conversation, Turn, write_jsonl
+from compressor.eval.downstream import AxisScores, ContinuationText
 from compressor.eval.faithfulness import (
     CoverageDecision,
     CoverageReportV1,
@@ -25,6 +26,8 @@ from compressor.eval.run_pilot import (
     CompressionRow,
     aggregate_faithfulness,
     aggregate_tier,
+    inter_judge_agreement,
+    run_downstream,
     run_faithfulness,
 )
 
@@ -185,3 +188,84 @@ def test_pilot_cache_resumes(tmp_path):
     run_faithfulness(comp_rows, conversations, [judge2], cache2)
     assert len(judge2.calls) == 0  # fully served from cache
     assert calls_after_first > 0
+
+
+def test_downstream_runner_caches_generation_and_judges(tmp_path):
+    row = CompressionRow(
+        "c1",
+        "tfix375",
+        "recent",
+        3,
+        "redis context",
+        100,
+        40,
+        last_user_turn="what next?",
+        held_assistant_turn="restart redis",
+    )
+    generator = MockJudgeClient(name="generator")
+    judge_a = MockJudgeClient(name="judge-a")
+    judge_b = MockJudgeClient(name="judge-b")
+
+    continuation_prompt = load_prompt("downstream_continue_v1")
+    _, continuation_user = continuation_prompt.render(
+        compression="redis context", last_user_turn="what next?"
+    )
+    generator.register_response(
+        "downstream_continue_v1",
+        continuation_user,
+        ContinuationText(text="restart redis"),
+    )
+    score_prompt = load_prompt("downstream_score_v1")
+    _, score_user = score_prompt.render(
+        last_user_turn="what next?",
+        continuation="restart redis",
+        ground_truth="restart redis",
+    )
+    judge_a.register_response(
+        "downstream_score_v1",
+        score_user,
+        AxisScores(substance=5, fidelity=None, coherence=5),
+    )
+    judge_b.register_response(
+        "downstream_score_v1",
+        score_user,
+        AxisScores(substance=4, fidelity=None, coherence=4),
+    )
+
+    cache_path = tmp_path / "cache.jsonl"
+    scores = run_downstream(
+        [row], generator, [judge_a, judge_b], JudgeCache(cache_path)
+    )
+    assert scores[("c1", "tfix375", "recent")] == {
+        "judge-a": 5.0,
+        "judge-b": 4.0,
+    }
+
+    resumed = run_downstream(
+        [row],
+        MockJudgeClient(name="generator"),
+        [MockJudgeClient(name="judge-a"), MockJudgeClient(name="judge-b")],
+        JudgeCache(cache_path),
+    )
+    assert resumed == scores
+
+
+def test_inter_judge_agreement_reports_icc_and_kappa():
+    scores = {
+        ("c1", "ours", "recent"): {"a": 1.0, "b": 1.0},
+        ("c2", "ours", "recent"): {"a": 0.0, "b": 0.5},
+    }
+    labels = {
+        ("c1", "ours", "recent", "a"): [{"id": 1, "present": "present"}],
+        ("c1", "ours", "recent", "b"): [{"id": 1, "present": "present"}],
+        ("c2", "ours", "recent", "a"): [{"id": 1, "present": "false"}],
+        ("c2", "ours", "recent", "b"): [{"id": 1, "present": "partial"}],
+    }
+
+    agreement = inter_judge_agreement(scores, labels=labels)
+
+    assert agreement["n_shared_rows"] == 2
+    assert agreement["n_shared_item_calls"] == 2
+    assert agreement["icc21"] is not None
+    assert agreement["kappa_binary"] == pytest.approx(1.0)
+    assert agreement["kappa_band"] == "acceptable"
