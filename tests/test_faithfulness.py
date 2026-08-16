@@ -10,6 +10,7 @@ Uses MockJudgeClient — no real API calls. Validates:
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -181,6 +182,35 @@ def test_check_coverage_passes_through_valid_evidence():
     decisions, _ = check_coverage(items, compression, judge)
     assert decisions[0].present == "present"
     assert decisions[1].present == "present"
+
+
+def test_check_coverage_accepts_long_verbatim_evidence():
+    """Provider tool output may exceed the requested 30-char evidence span.
+    A long span is still valid when it is an exact compression substring."""
+    judge = MockJudgeClient()
+    items = _make_items((1, "entity", "NLP applications", "Natural language"))
+    evidence = (
+        "Natural language processing supports classification, summarization, "
+        "translation, and recommendation systems"
+    )
+    compression = f"Key applications: {evidence}."
+    prompt = load_prompt("faithfulness_stage2_v1")
+    items_json = json.dumps([it.model_dump() for it in items], ensure_ascii=False)
+    _, user = prompt.render(items_json=items_json, compression=compression)
+    judge.register_response(
+        "faithfulness_stage2_v1",
+        user,
+        CoverageReportV1(
+            decisions=[
+                CoverageDecision(id=1, present="present", evidence=evidence)
+            ]
+        ),
+    )
+
+    decisions, _ = check_coverage(items, compression, judge)
+
+    assert decisions[0].present == "present"
+    assert decisions[0].evidence == evidence
 
 
 def test_check_coverage_downgrades_hallucinated_evidence():

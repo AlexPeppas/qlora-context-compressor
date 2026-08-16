@@ -104,8 +104,12 @@ class CoverageDecision(BaseModel):
     present: CoverageCall
     evidence: str = Field(
         default="",
-        description="Short verbatim substring from the compression supporting present/partial; empty for false",
-        max_length=80,  # tolerate slightly more than spec
+        description=(
+            "Verbatim substring from the compression supporting "
+            "present/partial; empty for false. The prompt requests a short "
+            "span, but grounding validation—not a transport length cap—is "
+            "the authoritative constraint."
+        ),
     )
 
 
