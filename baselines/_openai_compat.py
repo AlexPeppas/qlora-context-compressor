@@ -8,10 +8,9 @@ The OpenAI API changed parameters across model generations:
     instead of `max_tokens`, and some reject `temperature` != 1 and/or `seed`.
 
 `openai_chat_create` retries with progressively-adjusted parameters when the
-API rejects one, so the SAME calling code works across both generations. It
-records which parameters were actually accepted (in the returned completion's
-`_compat` attribute is NOT set — callers who need provenance should inspect
-their own request). This keeps the baselines + judges backend-uniform.
+API rejects one, so the SAME calling code works across both generations. The
+accepted generation parameters are attached to the returned completion as
+`_compat_params` for provenance.
 
 We prefer detecting via the error response rather than hard-coding model-name
 prefixes, because the model list changes faster than we can maintain a table.
@@ -70,8 +69,24 @@ def openai_chat_create(
     for _attempt in range(6):
         try:
             if use_parse:
-                return client.chat.completions.parse(**params)
-            return client.chat.completions.create(**params)
+                completion = client.chat.completions.parse(**params)
+            else:
+                completion = client.chat.completions.create(**params)
+            object.__setattr__(
+                completion,
+                "_compat_params",
+                {
+                    key: params.get(key)
+                    for key in (
+                        "max_completion_tokens",
+                        "max_tokens",
+                        "temperature",
+                        "seed",
+                    )
+                    if key in params
+                },
+            )
+            return completion
         except BadRequestError as e:
             msg = str(e).lower()
             if "max_completion_tokens" in msg and "max_tokens" in msg and not tried_legacy_tokens:

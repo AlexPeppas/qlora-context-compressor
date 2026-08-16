@@ -288,16 +288,22 @@ class OpenAIJudgeClient:
         from openai import APIConnectionError, APITimeoutError, RateLimitError  # noqa: PLC0415
 
         def _do_call() -> Any:
-            return self._client.chat.completions.parse(
+            try:
+                from compressor.baselines._openai_compat import openai_chat_create
+            except ImportError:
+                from baselines._openai_compat import openai_chat_create
+
+            return openai_chat_create(
+                self._client,
                 model=self.snapshot_id,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 response_format=response_model,
+                max_output_tokens=max_tokens,
                 temperature=temperature,
                 seed=seed,
-                max_tokens=max_tokens,
             )
 
         t0 = time.time()
@@ -336,7 +342,7 @@ class OpenAIJudgeClient:
             schema_name=response_model.__name__,
             temperature=temperature,
             seed=seed,
-            seed_supported=True,
+            seed_supported="seed" in getattr(completion, "_compat_params", {}),
         )
         return JudgeResult(
             parsed=parsed,
@@ -344,7 +350,12 @@ class OpenAIJudgeClient:
             provenance=provenance,
             usage=token_usage,
             wall_seconds=round(dt, 3),
-            extras={"finish_reason": choice.finish_reason},
+            extras={
+                "finish_reason": choice.finish_reason,
+                "accepted_generation_params": getattr(
+                    completion, "_compat_params", {}
+                ),
+            },
         )
 
 
