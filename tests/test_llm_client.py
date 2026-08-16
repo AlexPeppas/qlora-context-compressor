@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from pydantic import BaseModel, Field
@@ -99,6 +100,36 @@ def test_anthropic_judge_repairs_json_stringified_list_field():
     assert result.parsed.decisions == [
         {"id": 1, "present": "false", "evidence": ""}
     ]
+    assert result.extras["repaired_json_string_fields"] == ["decisions"]
+
+
+def test_anthropic_judge_repairs_double_json_encoded_list_field():
+    encoded_once = '[{"id": 1, "present": "false", "evidence": ""}]'
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                name="_ListResponse",
+                input={"decisions": json.dumps(encoded_once)},
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        stop_reason="tool_use",
+    )
+    client = AnthropicJudgeClient(name="claude-secondary")
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **_params: response)
+    )
+
+    result = client.call(
+        "system",
+        "user",
+        _ListResponse,
+        prompt_name="test",
+        prompt_hash="hash",
+    )
+
+    assert result.parsed.decisions[0]["id"] == 1
     assert result.extras["repaired_json_string_fields"] == ["decisions"]
 
 

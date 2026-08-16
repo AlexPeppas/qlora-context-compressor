@@ -180,10 +180,14 @@ def _repair_json_encoded_structures(
             continue
         if not isinstance(value, str):
             continue
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            continue
+        decoded: Any = value
+        for _ in range(3):
+            if not isinstance(decoded, str):
+                break
+            try:
+                decoded = json.loads(decoded)
+            except json.JSONDecodeError:
+                break
         if not isinstance(decoded, expected):
             continue
         parent[leaf] = decoded
