@@ -13,6 +13,7 @@ import hashlib
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from compressor.eval.faithfulness import (
     RUBRIC_VERSION,
@@ -211,6 +212,31 @@ def test_check_coverage_accepts_long_verbatim_evidence():
 
     assert decisions[0].present == "present"
     assert decisions[0].evidence == evidence
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        '[{"id": 1, "present": "false", "evidence": ""}]',
+        json.dumps(
+            json.dumps(
+                json.dumps('[{"id": 1, "present": "false", "evidence": ""}]')
+            )
+        ),
+        '```json\n[{"id": 1, "present": "false", "evidence": ""}]\n```',
+    ],
+)
+def test_coverage_report_decodes_stringified_decisions(encoded):
+    report = CoverageReportV1.model_validate({"decisions": encoded})
+
+    assert report.decisions == [
+        CoverageDecision(id=1, present="false", evidence="")
+    ]
+
+
+def test_coverage_report_rejects_malformed_stringified_decisions():
+    with pytest.raises(ValidationError):
+        CoverageReportV1.model_validate({"decisions": "[not valid JSON"})
 
 
 def test_check_coverage_downgrades_hallucinated_evidence():

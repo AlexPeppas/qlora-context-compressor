@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .llm_client import JudgeClient, JudgeResult
 from .prompts import load_prompt
@@ -117,6 +117,30 @@ class CoverageReportV1(BaseModel):
     """Stage 2 structured output: per-item coverage decisions."""
 
     decisions: list[CoverageDecision] = Field(min_length=1)
+
+    @field_validator("decisions", mode="before")
+    @classmethod
+    def decode_json_stringified_decisions(cls, value):
+        """Normalize provider tool payloads that stringify the decisions list.
+
+        The Anthropic tool schema still declares an array. This only handles
+        transport-level JSON wrapping; the decoded value is subsequently
+        validated as a strict list of CoverageDecision objects.
+        """
+        decoded = value
+        for _ in range(10):
+            if not isinstance(decoded, str):
+                break
+            candidate = decoded.strip()
+            if candidate.startswith("```") and candidate.endswith("```"):
+                lines = candidate.splitlines()
+                if len(lines) >= 3:
+                    candidate = "\n".join(lines[1:-1]).strip()
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError:
+                break
+        return decoded
 
 
 def check_coverage(
