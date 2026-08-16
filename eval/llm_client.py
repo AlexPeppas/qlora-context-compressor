@@ -24,10 +24,11 @@ import json
 import logging
 import os
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence, Type, TypeVar, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,46 @@ def schema_hash_of(model_cls: Type[BaseModel]) -> str:
     schema = model_cls.model_json_schema()
     blob = json.dumps(schema, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _repair_json_encoded_structures(
+    payload: Any, errors: Sequence[Mapping[str, Any]]
+) -> tuple[Any, list[str]]:
+    """Decode JSON-stringified list/dict fields identified by Pydantic.
+
+    Some tool-use responses serialize an array/object as a JSON string even
+    though the tool schema declares a structured value. Repair only locations
+    where validation explicitly reported a list/dict type mismatch; ordinary
+    string fields are never coerced.
+    """
+    repaired = deepcopy(payload)
+    repaired_paths: list[str] = []
+    expected_types = {"list_type": list, "dict_type": dict}
+    for error in errors:
+        expected = expected_types.get(str(error.get("type")))
+        location = tuple(error.get("loc") or ())
+        if expected is None or not location:
+            continue
+
+        parent = repaired
+        try:
+            for part in location[:-1]:
+                parent = parent[part]
+            leaf = location[-1]
+            value = parent[leaf]
+        except (KeyError, IndexError, TypeError):
+            continue
+        if not isinstance(value, str):
+            continue
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(decoded, expected):
+            continue
+        parent[leaf] = decoded
+        repaired_paths.append(".".join(str(part) for part in location))
+    return repaired, repaired_paths
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +509,23 @@ class AnthropicJudgeClient:
                 f"Response content types: {[getattr(b, 'type', None) for b in response.content]}"
             )
 
-        parsed = response_model.model_validate(tool_block.input)
+        normalized_input = tool_block.input
+        repaired_paths: list[str] = []
+        try:
+            parsed = response_model.model_validate(normalized_input)
+        except ValidationError as exc:
+            normalized_input, repaired_paths = _repair_json_encoded_structures(
+                tool_block.input, exc.errors()
+            )
+            if not repaired_paths:
+                raise
+            logger.warning(
+                "Anthropic judge %s returned JSON-stringified tool fields; "
+                "decoded and revalidated: %s",
+                self.snapshot_id,
+                repaired_paths,
+            )
+            parsed = response_model.model_validate(normalized_input)
         raw = json.dumps(tool_block.input, ensure_ascii=False)
 
         usage = response.usage
@@ -496,7 +553,10 @@ class AnthropicJudgeClient:
             provenance=provenance,
             usage=token_usage,
             wall_seconds=round(dt, 3),
-            extras={"stop_reason": response.stop_reason},
+            extras={
+                "stop_reason": response.stop_reason,
+                "repaired_json_string_fields": repaired_paths,
+            },
         )
 
 
