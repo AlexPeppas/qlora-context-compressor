@@ -239,6 +239,31 @@ def test_coverage_report_rejects_malformed_stringified_decisions():
         CoverageReportV1.model_validate({"decisions": "[not valid JSON"})
 
 
+def test_coverage_report_repairs_missing_present_keys_from_captured_payload():
+    captured_shape = (
+        '[{"id": 1, "present": "present", "evidence": "outline"},'
+        '{"id": 2, "partial", "evidence": "challenges/lessons"},'
+        '{"id": 3, "present": "partial", "evidence": "privacy/security"},'
+        '{"id": 4, "false", "evidence": ""}]'
+    )
+
+    report = CoverageReportV1.model_validate({"decisions": captured_shape})
+
+    assert [(decision.id, decision.present) for decision in report.decisions] == [
+        (1, "present"),
+        (2, "partial"),
+        (3, "partial"),
+        (4, "false"),
+    ]
+
+
+def test_coverage_report_does_not_repair_unknown_standalone_values():
+    malformed = '[{"id": 1, "maybe", "evidence": ""}]'
+
+    with pytest.raises(ValidationError):
+        CoverageReportV1.model_validate({"decisions": malformed})
+
+
 def test_check_coverage_downgrades_hallucinated_evidence():
     """Judge claims `present` with evidence that isn't actually in the compression
     -> automatically downgraded to `false`. This is the rubber-duck-required

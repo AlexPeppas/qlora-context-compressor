@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
@@ -97,6 +98,9 @@ def extract_critical_items(
 
 
 CoverageCall = Literal["present", "partial", "false"]
+_MISSING_PRESENT_KEY_RE = re.compile(
+    r'(\{\s*"id"\s*:\s*\d+\s*,\s*)"(present|partial|false)"\s*,'
+)
 
 
 class CoverageDecision(BaseModel):
@@ -139,7 +143,18 @@ class CoverageReportV1(BaseModel):
             try:
                 decoded = json.loads(candidate)
             except json.JSONDecodeError:
-                break
+                repaired, repair_count = _MISSING_PRESENT_KEY_RE.subn(
+                    lambda match: (
+                        f'{match.group(1)}"present": "{match.group(2)}",'
+                    ),
+                    candidate,
+                )
+                if repair_count == 0:
+                    break
+                try:
+                    decoded = json.loads(repaired)
+                except json.JSONDecodeError:
+                    break
         return decoded
 
 
