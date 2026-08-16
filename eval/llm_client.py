@@ -26,6 +26,7 @@ import os
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, Type, TypeVar, runtime_checkable
 
 from pydantic import BaseModel, ValidationError
@@ -193,6 +194,37 @@ def _repair_json_encoded_structures(
         parent[leaf] = decoded
         repaired_paths.append(".".join(str(part) for part in location))
     return repaired, repaired_paths
+
+
+def _record_validation_failure(
+    *,
+    backend: str,
+    model: str,
+    prompt_name: str,
+    schema_name: str,
+    payload: Any,
+    errors: Sequence[Mapping[str, Any]],
+) -> Path:
+    """Persist exact malformed structured output without API credentials."""
+    path = Path(
+        os.getenv(
+            "JUDGE_FAILURE_LOG",
+            "runs/judge_validation_failures.jsonl",
+        )
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": time.time(),
+        "backend": backend,
+        "model": model,
+        "prompt_name": prompt_name,
+        "schema_name": schema_name,
+        "payload": payload,
+        "validation_errors": list(errors),
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +554,18 @@ class AnthropicJudgeClient:
                 tool_block.input, exc.errors()
             )
             if not repaired_paths:
+                failure_path = _record_validation_failure(
+                    backend=self.backend,
+                    model=self.snapshot_id,
+                    prompt_name=prompt_name,
+                    schema_name=response_model.__name__,
+                    payload=tool_block.input,
+                    errors=exc.errors(),
+                )
+                logger.error(
+                    "Unrecoverable Anthropic tool validation failure recorded at %s",
+                    failure_path,
+                )
                 raise
             logger.warning(
                 "Anthropic judge %s returned JSON-stringified tool fields; "
@@ -529,7 +573,22 @@ class AnthropicJudgeClient:
                 self.snapshot_id,
                 repaired_paths,
             )
-            parsed = response_model.model_validate(normalized_input)
+            try:
+                parsed = response_model.model_validate(normalized_input)
+            except ValidationError as repaired_exc:
+                failure_path = _record_validation_failure(
+                    backend=self.backend,
+                    model=self.snapshot_id,
+                    prompt_name=prompt_name,
+                    schema_name=response_model.__name__,
+                    payload=tool_block.input,
+                    errors=repaired_exc.errors(),
+                )
+                logger.error(
+                    "Anthropic tool repair still failed; exact payload recorded at %s",
+                    failure_path,
+                )
+                raise
         raw = json.dumps(tool_block.input, ensure_ascii=False)
 
         usage = response.usage

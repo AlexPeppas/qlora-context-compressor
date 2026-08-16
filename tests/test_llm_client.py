@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from pydantic import BaseModel, Field
+import pytest
 
 from compressor.eval.llm_client import AnthropicJudgeClient, OpenAIJudgeClient
 
@@ -160,3 +161,36 @@ def test_anthropic_judge_does_not_coerce_normal_string_fields():
 
     assert result.parsed.answer == '["still", "a", "string"]'
     assert result.extras["repaired_json_string_fields"] == []
+
+
+def test_anthropic_judge_records_unrecoverable_tool_payload(tmp_path, monkeypatch):
+    failure_log = tmp_path / "failures.jsonl"
+    monkeypatch.setenv("JUDGE_FAILURE_LOG", str(failure_log))
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                name="_ListResponse",
+                input={"decisions": "[not valid JSON"},
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        stop_reason="tool_use",
+    )
+    client = AnthropicJudgeClient(name="claude-secondary")
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **_params: response)
+    )
+
+    with pytest.raises(Exception):
+        client.call(
+            "system",
+            "user",
+            _ListResponse,
+            prompt_name="faithfulness_stage2_v1",
+            prompt_hash="hash",
+        )
+
+    record = json.loads(failure_log.read_text(encoding="utf-8"))
+    assert record["payload"] == {"decisions": "[not valid JSON"}
+    assert record["prompt_name"] == "faithfulness_stage2_v1"
