@@ -510,7 +510,7 @@ class AnthropicJudgeClient:
             "input_schema": tool_schema,
         }
 
-        def _do_call() -> Any:
+        def _do_call(active_user_prompt: str) -> Any:
             # Note: Claude doesn't support a `seed` parameter as of writing.
             # We record seed_supported=False in provenance so reproducibility
             # claims are honest.
@@ -521,81 +521,112 @@ class AnthropicJudgeClient:
                 system=system_prompt,
                 tools=[tool],
                 tool_choice={"type": "tool", "name": tool_name},
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[{"role": "user", "content": active_user_prompt}],
             )
 
         t0 = time.time()
-        response = _exp_backoff_retry(
-            _do_call,
-            max_retries=3,
-            base_delay=2.0,
-            transient_exc_types=(RateLimitError, APITimeoutError, APIConnectionError),
-        )
-        dt = time.time() - t0
-
-        # Extract the tool_use block
+        active_user_prompt = user_prompt
+        response = None
         tool_block = None
-        for block in response.content:
-            if getattr(block, "type", None) == "tool_use" and block.name == tool_name:
-                tool_block = block
-                break
-        if tool_block is None:
-            raise RuntimeError(
-                f"Anthropic judge {self.snapshot_id} did not invoke the {tool_name!r} tool. "
-                f"Response content types: {[getattr(b, 'type', None) for b in response.content]}"
-            )
-
-        normalized_input = tool_block.input
+        parsed = None
         repaired_paths: list[str] = []
-        try:
-            parsed = response_model.model_validate(normalized_input)
-        except ValidationError as exc:
-            normalized_input, repaired_paths = _repair_json_encoded_structures(
-                tool_block.input, exc.errors()
+        validation_retries = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        for validation_attempt in range(3):
+            response = _exp_backoff_retry(
+                lambda: _do_call(active_user_prompt),
+                max_retries=3,
+                base_delay=2.0,
+                transient_exc_types=(
+                    RateLimitError,
+                    APITimeoutError,
+                    APIConnectionError,
+                ),
             )
-            if not repaired_paths:
-                failure_path = _record_validation_failure(
-                    backend=self.backend,
-                    model=self.snapshot_id,
-                    prompt_name=prompt_name,
-                    schema_name=response_model.__name__,
-                    payload=tool_block.input,
-                    errors=exc.errors(),
-                )
-                logger.error(
-                    "Unrecoverable Anthropic tool validation failure recorded at %s",
-                    failure_path,
-                )
-                raise
-            logger.warning(
-                "Anthropic judge %s returned JSON-stringified tool fields; "
-                "decoded and revalidated: %s",
-                self.snapshot_id,
-                repaired_paths,
+            total_input_tokens += response.usage.input_tokens
+            total_output_tokens += response.usage.output_tokens
+            tool_block = next(
+                (
+                    block
+                    for block in response.content
+                    if getattr(block, "type", None) == "tool_use"
+                    and block.name == tool_name
+                ),
+                None,
             )
+            if tool_block is None:
+                raise RuntimeError(
+                    f"Anthropic judge {self.snapshot_id} did not invoke the "
+                    f"{tool_name!r} tool. Response content types: "
+                    f"{[getattr(b, 'type', None) for b in response.content]}"
+                )
+
+            normalized_input = tool_block.input
+            repaired_paths = []
+            validation_error: ValidationError | None = None
             try:
                 parsed = response_model.model_validate(normalized_input)
-            except ValidationError as repaired_exc:
-                failure_path = _record_validation_failure(
-                    backend=self.backend,
-                    model=self.snapshot_id,
-                    prompt_name=prompt_name,
-                    schema_name=response_model.__name__,
-                    payload=tool_block.input,
-                    errors=repaired_exc.errors(),
+            except ValidationError as initial_exc:
+                normalized_input, repaired_paths = _repair_json_encoded_structures(
+                    tool_block.input, initial_exc.errors()
                 )
+                if repaired_paths:
+                    try:
+                        parsed = response_model.model_validate(normalized_input)
+                    except ValidationError as repaired_exc:
+                        validation_error = repaired_exc
+                else:
+                    validation_error = initial_exc
+
+            if validation_error is None:
+                break
+
+            failure_path = _record_validation_failure(
+                backend=self.backend,
+                model=self.snapshot_id,
+                prompt_name=prompt_name,
+                schema_name=response_model.__name__,
+                payload=tool_block.input,
+                errors=validation_error.errors(),
+            )
+            if validation_attempt == 2:
                 logger.error(
-                    "Anthropic tool repair still failed; exact payload recorded at %s",
+                    "Anthropic tool validation failed after %d correction "
+                    "attempts; payload recorded at %s",
+                    validation_attempt + 1,
                     failure_path,
                 )
-                raise
+                raise validation_error
+
+            validation_retries += 1
+            logger.warning(
+                "Anthropic judge %s returned invalid %s tool input; recorded at "
+                "%s and retrying with a transport-only correction (%d/2)",
+                self.snapshot_id,
+                response_model.__name__,
+                failure_path,
+                validation_retries,
+            )
+            active_user_prompt = (
+                user_prompt
+                + "\n\nSTRUCTURED OUTPUT CORRECTION: Return every tool field "
+                "using its native JSON schema type. Arrays must be JSON arrays, "
+                "not JSON-encoded strings. Include every required field name. "
+                "Escape quotation marks inside string values. Do not change the "
+                "rubric decisions solely because this is a formatting retry."
+            )
+
+        assert response is not None
+        assert tool_block is not None
+        assert parsed is not None
+        dt = time.time() - t0
         raw = json.dumps(tool_block.input, ensure_ascii=False)
 
-        usage = response.usage
         token_usage = TokenUsage(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.input_tokens + usage.output_tokens,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            total_tokens=total_input_tokens + total_output_tokens,
         )
         provenance = JudgeProvenance(
             judge_name=self.name,
@@ -619,6 +650,7 @@ class AnthropicJudgeClient:
             extras={
                 "stop_reason": response.stop_reason,
                 "repaired_json_string_fields": repaired_paths,
+                "structured_validation_retries": validation_retries,
             },
         )
 

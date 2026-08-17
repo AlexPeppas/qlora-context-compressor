@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from pydantic import BaseModel, Field
 import pytest
+from pydantic import BaseModel, Field
 
 from compressor.eval.llm_client import AnthropicJudgeClient, OpenAIJudgeClient
 
@@ -191,6 +191,73 @@ def test_anthropic_judge_records_unrecoverable_tool_payload(tmp_path, monkeypatc
             prompt_hash="hash",
         )
 
-    record = json.loads(failure_log.read_text(encoding="utf-8"))
-    assert record["payload"] == {"decisions": "[not valid JSON"}
-    assert record["prompt_name"] == "faithfulness_stage2_v1"
+    records = [
+        json.loads(line)
+        for line in failure_log.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 3
+    assert records[-1]["payload"] == {"decisions": "[not valid JSON"}
+    assert records[-1]["prompt_name"] == "faithfulness_stage2_v1"
+
+
+def test_anthropic_judge_retries_invalid_tool_payload_with_correction(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("JUDGE_FAILURE_LOG", str(tmp_path / "failures.jsonl"))
+    invalid = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                name="_ListResponse",
+                input={
+                    "decisions": (
+                        '[{"id": 1, "present": "present", '
+                        '"evidence": "raw "unescaped" quote"}]'
+                    )
+                },
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        stop_reason="tool_use",
+    )
+    valid = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                name="_ListResponse",
+                input={
+                    "decisions": [
+                        {"id": 1, "present": "present", "evidence": "quote"}
+                    ]
+                },
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=12, output_tokens=4),
+        stop_reason="tool_use",
+    )
+    responses = iter([invalid, valid])
+    calls = []
+
+    def create(**params):
+        calls.append(params)
+        return next(responses)
+
+    client = AnthropicJudgeClient(name="claude-secondary")
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(create=create)
+    )
+
+    result = client.call(
+        "system",
+        "user",
+        _ListResponse,
+        prompt_name="faithfulness_stage2_v1",
+        prompt_hash="hash",
+    )
+
+    assert len(calls) == 2
+    assert "STRUCTURED OUTPUT CORRECTION" in calls[1]["messages"][0]["content"]
+    assert result.parsed.decisions[0]["present"] == "present"
+    assert result.extras["structured_validation_retries"] == 1
+    assert result.usage.input_tokens == 22
+    assert result.usage.output_tokens == 9
