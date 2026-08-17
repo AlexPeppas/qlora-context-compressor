@@ -101,6 +101,21 @@ CoverageCall = Literal["present", "partial", "false"]
 _MISSING_PRESENT_KEY_RE = re.compile(
     r'(\{\s*"id"\s*:\s*\d+\s*,\s*)"(present|partial|false)"\s*,'
 )
+_NON_JSON_ESCAPE_RUN_RE = re.compile(r'(\\+)(?=[^"\\/bfnrtu])')
+
+
+def _escape_odd_non_json_backslashes(value: str) -> str:
+    """Make literal LaTeX-style backslashes valid inside JSON strings.
+
+    Even runs already encode literal backslashes correctly. Odd runs before a
+    non-JSON escape character (for example ``\\)``) need one additional slash.
+    """
+    return _NON_JSON_ESCAPE_RUN_RE.sub(
+        lambda match: (
+            match.group(1) + ("\\" if len(match.group(1)) % 2 else "")
+        ),
+        value,
+    )
 
 
 class CoverageDecision(BaseModel):
@@ -140,6 +155,7 @@ class CoverageReportV1(BaseModel):
                 lines = candidate.splitlines()
                 if len(lines) >= 3:
                     candidate = "\n".join(lines[1:-1]).strip()
+            candidate = _escape_odd_non_json_backslashes(candidate)
             try:
                 decoded = json.loads(candidate)
             except json.JSONDecodeError:

@@ -264,6 +264,22 @@ def test_coverage_report_does_not_repair_unknown_standalone_values():
         CoverageReportV1.model_validate({"decisions": malformed})
 
 
+def test_coverage_report_repairs_latex_non_json_escapes():
+    captured_shape = (
+        '[{"id": 1, "present": "present", '
+        '"evidence": "P[A]=0.7\\n- \\\\(P[B]=0.4\\\\)"},'
+        '{"id": 2, "present": "present", '
+        '"evidence": "P[A]=0.7\\)- \\\\(P[B]=0.6\\\\)"},'
+        '{"id": 3, "present": "false", "evidence": ""}]'
+    )
+
+    report = CoverageReportV1.model_validate({"decisions": captured_shape})
+
+    assert len(report.decisions) == 3
+    assert report.decisions[0].evidence == "P[A]=0.7\n- \\(P[B]=0.4\\)"
+    assert report.decisions[1].evidence == "P[A]=0.7\\)- \\(P[B]=0.6\\)"
+
+
 def test_check_coverage_downgrades_hallucinated_evidence():
     """Judge claims `present` with evidence that isn't actually in the compression
     -> automatically downgraded to `false`. This is the rubber-duck-required
