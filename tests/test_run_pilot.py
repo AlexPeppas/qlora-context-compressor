@@ -146,17 +146,25 @@ def test_pilot_faithfulness_end_to_end(tmp_path):
     faith = aggregate_faithfulness(scores, our_system="tfix375", n_boot=500, seed=1)
     assert "tfix375|recent" in faith["per_system_tier"]
     assert "llmlingua2" in faith["paired_vs_ours"]
-    # ours wins at recent (1.0 vs 0.5) and mid (0.5 vs 0.5 tie) loses at old (0 vs 0.5)
+    # Conversation-level means are equal: (1 + .5 + 0)/3 == (.5 + .5 + .5)/3.
     wl = faith["paired_vs_ours"]["llmlingua2"]["win_loss"]
-    # per (conv,tier): recent ours>ling (win x2), mid tie x2, old ours<ling (loss x2)
-    assert wl["a_wins"] == 2
-    assert wl["b_wins"] == 2
+    assert faith["paired_vs_ours"]["llmlingua2"]["n_conversations"] == 2
+    assert wl["a_wins"] == 0
+    assert wl["b_wins"] == 0
     assert wl["ties"] == 2
+    assert "mean_delta_ci" in faith["paired_vs_ours"]["llmlingua2"]
+    assert set(faith["per_judge_system_tier"]) == {
+        "gpt-primary",
+        "claude-secondary",
+    }
 
     # Tier curve: ours should be monotonic decreasing, llmlingua flat
     tier_agg = aggregate_tier(scores, our_system="tfix375")
     assert tier_agg["tfix375"]["monotonicity_rate"] == pytest.approx(1.0)
     assert tier_agg["tfix375"]["mean_delta_recent_old"] == pytest.approx(1.0)
+    assert "delta_recent_old_ci" in tier_agg["tfix375"]
+    assert "monotonicity_ci" in tier_agg["tfix375"]
+    assert "curve_auc_ci" in tier_agg["tfix375"]
     # llmlingua flat -> delta 0, still monotonic (flat within eps)
     assert tier_agg["llmlingua2"]["mean_delta_recent_old"] == pytest.approx(0.0)
 

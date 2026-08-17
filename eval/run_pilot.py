@@ -253,7 +253,11 @@ def aggregate_faithfulness(
     systems = sorted({k[1] for k in ens})
     tiers = sorted({k[2] for k in ens})
 
-    out: dict[str, Any] = {"per_system_tier": {}, "paired_vs_ours": {}}
+    out: dict[str, Any] = {
+        "per_system_tier": {},
+        "per_judge_system_tier": {},
+        "paired_vs_ours": {},
+    }
 
     # Per-(system, tier) CI
     for system in systems:
@@ -270,23 +274,69 @@ def aggregate_faithfulness(
             )
             out["per_system_tier"][f"{system}|{tier}"] = ci.to_dict()
 
-    # Paired ours vs each competitor (pooled across tiers, keyed by conv+tier)
+    # Per-judge breakdown uses the same clustered CI procedure.
+    judge_names = sorted(
+        {judge for per_judge in scores.values() for judge in per_judge}
+    )
+    for judge in judge_names:
+        judge_table: dict[str, Any] = {}
+        for system in systems:
+            for tier in tiers:
+                vals, clusters = [], []
+                for (cid, s, t), per_judge in scores.items():
+                    if s == system and t == tier and judge in per_judge:
+                        vals.append(per_judge[judge])
+                        clusters.append(cid)
+                if vals:
+                    judge_table[f"{system}|{tier}"] = (
+                        m_stats.clustered_bootstrap_ci(
+                            vals,
+                            clusters,
+                            n_boot=n_boot,
+                            seed=seed,
+                        ).to_dict()
+                    )
+        out["per_judge_system_tier"][judge] = judge_table
+
+    # Paired tests use one score per conversation: mean across its three tiers.
+    by_system_conversation: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for (cid, system, _tier), value in ens.items():
+        by_system_conversation[(system, cid)].append(value)
+    conversation_scores = {
+        key: sum(values) / len(values)
+        for key, values in by_system_conversation.items()
+    }
+
     for competitor in systems:
         if competitor == our_system:
             continue
-        ours_scores, comp_scores = {}, {}
-        for (cid, s, t), v in ens.items():
-            pair_key = f"{cid}|{t}"
-            if s == our_system:
-                ours_scores[pair_key] = v
-            elif s == competitor:
-                comp_scores[pair_key] = v
+        ours_scores = {
+            cid: value
+            for (system, cid), value in conversation_scores.items()
+            if system == our_system
+        }
+        comp_scores = {
+            cid: value
+            for (system, cid), value in conversation_scores.items()
+            if system == competitor
+        }
         if not (ours_scores and comp_scores):
             continue
+        shared = sorted(set(ours_scores) & set(comp_scores))
+        deltas = [ours_scores[cid] - comp_scores[cid] for cid in shared]
+        delta_ci = m_stats.clustered_bootstrap_ci(
+            deltas,
+            shared,
+            n_boot=n_boot,
+            seed=seed,
+        )
         wl = m_stats.paired_win_loss(ours_scores, comp_scores)
         mcn = m_stats.mcnemar_test(wl)
         wil = m_stats.wilcoxon_paired(ours_scores, comp_scores)
         out["paired_vs_ours"][competitor] = {
+            "unit": "conversation_mean_across_tiers",
+            "n_conversations": len(shared),
+            "mean_delta_ci": delta_ci.to_dict(),
             "win_loss": {"a_wins": wl.a_wins, "b_wins": wl.b_wins, "ties": wl.ties},
             "mcnemar": mcn.to_dict(),
             "wilcoxon": wil.to_dict(),
@@ -363,6 +413,8 @@ def aggregate_tier(
     scores: dict[tuple[str, str, str], dict[str, float]],
     *,
     our_system: str,
+    seed: int = 42,
+    n_boot: int = 10000,
 ) -> dict:
     """Curve stats per (conversation, system) from ensemble-mean faithfulness."""
     ens: dict[tuple[str, str, str], float] = {
@@ -374,7 +426,7 @@ def aggregate_tier(
         by_sys_conv[(system, cid)][tier] = v
 
     out: dict[str, Any] = {}
-    per_system_curves: dict[str, list] = defaultdict(list)
+    per_system_curves: dict[str, list[tuple[str, Any]]] = defaultdict(list)
     for (system, cid), tier_scores in by_sys_conv.items():
         if len(tier_scores) < 3:
             continue  # need all three tiers for a curve
@@ -382,11 +434,36 @@ def aggregate_tier(
             curve = tier_metrics.compute_curve(tier_scores)
         except KeyError:
             continue
-        per_system_curves[system].append(curve)
+        per_system_curves[system].append((cid, curve))
 
-    for system, curves in per_system_curves.items():
+    for system, identified_curves in per_system_curves.items():
+        conversation_ids = [cid for cid, _curve in identified_curves]
+        curves = [curve for _cid, curve in identified_curves]
         agg = tier_metrics.aggregate_curves(curves)
-        out[system] = agg.to_dict()
+        delta_ci = m_stats.clustered_bootstrap_ci(
+            [curve.delta_recent_old for curve in curves],
+            conversation_ids,
+            n_boot=n_boot,
+            seed=seed,
+        )
+        monotonicity_ci = m_stats.clustered_bootstrap_ci(
+            [float(curve.monotonic) for curve in curves],
+            conversation_ids,
+            n_boot=n_boot,
+            seed=seed,
+        )
+        auc_ci = m_stats.clustered_bootstrap_ci(
+            [curve.curve_auc for curve in curves],
+            conversation_ids,
+            n_boot=n_boot,
+            seed=seed,
+        )
+        out[system] = {
+            **agg.to_dict(),
+            "delta_recent_old_ci": delta_ci.to_dict(),
+            "monotonicity_ci": monotonicity_ci.to_dict(),
+            "curve_auc_ci": auc_ci.to_dict(),
+        }
     return out
 
 
@@ -533,7 +610,10 @@ def main() -> None:
             )
         if "tier" in metrics:
             results["tier_appropriate"] = aggregate_tier(
-                faith_scores, our_system=args.our_system
+                faith_scores,
+                our_system=args.our_system,
+                seed=args.seed,
+                n_boot=args.n_boot,
             )
         results["faithfulness_agreement"] = inter_judge_agreement(
             faith_scores, labels=cache.faithfulness_labels()
